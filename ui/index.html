@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARXOS Kernel Tuner</title>
+<meta name="color-scheme" content="dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#191a1f; --bg2:#1e1f25; --ink:#0d0d10; --fg:#f2f4f8; --muted:rgba(255,255,255,.66);
+  --dim:rgba(255,255,255,.4); --faint:rgba(255,255,255,.1); --line:rgba(255,255,255,.12);
+  --accent:#e8702a; --accent-hi:#ff8a44; --ok:#4ec37a; --bad:#ff6b6b;
+  --glass:linear-gradient(158deg,rgba(255,255,255,.06),rgba(255,255,255,.02) 60%,rgba(255,255,255,.008));
+  --disp:'Playfair Display',serif; --sans:'Inter',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:15px;line-height:1.55}
+a{color:var(--accent-hi);text-decoration:none}
+.wrap{max-width:940px;margin:0 auto;padding:26px 22px 60px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+h1{font-family:var(--disp);font-style:italic;font-weight:700;font-size:2rem;margin:0;color:#fff}
+.sub{font-family:var(--mono);font-size:12px;color:var(--dim);letter-spacing:.02em}
+.host{margin-top:16px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.pill{font-family:var(--mono);font-size:12px;padding:6px 13px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--muted)}
+.pill b{color:var(--accent-hi);font-weight:700}
+.card{background:var(--glass);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-top:16px}
+.card h2{font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin:0 0 14px;font-weight:700}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{background:transparent;color:var(--muted);border:0;font-family:var(--mono);font-size:12.5px;padding:9px 15px;cursor:pointer;transition:.15s}
+.seg button.on{background:linear-gradient(180deg,var(--accent-hi),var(--accent));color:#160b04;font-weight:700}
+.seg button:not(.on):hover{color:var(--fg);background:rgba(255,255,255,.04)}
+.btn{font-family:var(--sans);font-weight:600;font-size:13.5px;border:0;border-radius:10px;padding:10px 18px;cursor:pointer;transition:.15s}
+.btn.primary{background:linear-gradient(180deg,var(--accent-hi),var(--accent));color:#160b04}
+.btn.primary:hover{background:var(--accent-hi)}
+.btn.ghost{background:rgba(255,255,255,.05);color:var(--fg);border:1px solid var(--line)}
+.btn.ghost:hover{border-color:var(--accent)}
+.plan dl{display:grid;grid-template-columns:120px 1fr;gap:8px 16px;margin:0;font-size:13.5px}
+.plan dt{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);padding-top:2px}
+.plan dd{margin:0;color:var(--fg)}
+.plan .list{display:flex;flex-direction:column;gap:5px}
+.plan .list span{color:var(--muted)}
+.plan .out{color:var(--accent-hi);font-family:var(--mono);font-size:12.5px}
+.harden{display:flex;flex-wrap:wrap;gap:8px}
+.harden .h{font-family:var(--mono);font-size:11.5px;padding:5px 10px;border-radius:7px;border:1px solid rgba(78,195,122,.35);background:rgba(78,195,122,.08);color:#bfe9cf}
+pre.log{background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:14px;margin:0;max-height:340px;overflow:auto;font-family:var(--mono);font-size:12px;color:#cfd2c8;white-space:pre-wrap;word-break:break-word}
+.muted{color:var(--muted)}.dim{color:var(--dim)}
+footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+.warn{margin-top:10px;font-size:12.5px;color:#ffd7b0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>ARXOS Kernel Tuner</h1>
+      <div class="sub">CachyOS tunes + ARXOS hardening on Arch &amp; Debian</div>
+    </div>
+    <div class="sub" id="ver">akt</div>
+  </header>
+
+  <div class="host">
+    <span class="pill">host <b id="distro">…</b></span>
+    <span class="pill" id="pathpill">path <b id="path">detecting</b></span>
+  </div>
+
+  <div class="card">
+    <h2>Flavor</h2>
+    <div class="row">
+      <div class="seg" id="flavors">
+        <button data-f="default" class="on">default</button>
+        <button data-f="rt">rt</button>
+        <button data-f="hardened">hardened</button>
+      </div>
+      <span class="dim" id="flavorabout">balanced daily driver (BORE + ThinLTO)</span>
+    </div>
+  </div>
+
+  <div class="card plan">
+    <h2>Tune plan</h2>
+    <dl>
+      <dt>Base</dt><dd id="p-base" class="muted">…</dd>
+      <dt>Tunes</dt><dd><div class="list" id="p-tunes"></div></dd>
+      <dt>Overlays</dt><dd><div class="list" id="p-overlays"></div></dd>
+      <dt>Patches</dt><dd><div class="list" id="p-patches"></div></dd>
+      <dt>Output</dt><dd class="out" id="p-output">…</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Hardening delta (verified before every compile)</h2>
+    <div class="harden">
+      <span class="h">init_on_free</span><span class="h">init_on_alloc</span><span class="h">hibernation off</span>
+      <span class="h">IOMMU strict</span><span class="h">lockdown early</span><span class="h">IMA</span>
+      <span class="h">livepatch</span><span class="h">dmesg restrict</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Build</h2>
+    <div class="row">
+      <button class="btn ghost" id="dryBtn">Dry run</button>
+      <button class="btn primary" id="buildBtn">Build tuned kernel</button>
+      <span class="dim" id="buildstate"></span>
+    </div>
+    <div class="warn">The build is long (ThinLTO). Boot-test the result in a throwaway VM before installing on real hardware.</div>
+    <pre class="log" id="log" style="margin-top:14px" hidden></pre>
+  </div>
+
+  <footer>
+    <span>ARXOS Kernel Tuner · Stingray Labs</span>
+    <span>local · 127.0.0.1</span>
+  </footer>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+let flavor='default', poll=null;
+const ABOUT={default:'balanced daily driver (BORE + ThinLTO)', rt:'real-time (PREEMPT_RT + BORE)', hardened:'max security posture (KSPP + kCFI)'};
+
+async function jget(u){ try{ const r=await fetch(u); return r.ok?r.json():null; }catch(e){ return null; } }
+
+async function detect(){
+  const d=await jget('/api/detect');
+  if(!d){ $('#distro').textContent='offline'; return; }
+  $('#distro').textContent=d.distro;
+  $('#path').textContent = d.supported ? (d.distro==='arch'?'CachyOS fork → pacman pkg':'Debian source → .deb') : 'unsupported host';
+  if(!d.supported){ $('#buildBtn').disabled=true; $('#buildBtn').style.opacity=.5; }
+}
+function fill(id,arr){ const el=$(id); el.innerHTML=''; (arr||[]).forEach(t=>{const s=document.createElement('span');s.textContent=t;el.appendChild(s);}); if(!arr||!arr.length){const s=document.createElement('span');s.className='dim';s.textContent='—';el.appendChild(s);} }
+async function plan(){
+  const p=await jget('/api/plan?flavor='+flavor);
+  if(!p) return;
+  $('#p-base').textContent=p.base; $('#p-output').textContent=p.output;
+  fill('#p-tunes',p.tunes); fill('#p-overlays',p.overlays); fill('#p-patches',p.patch_sets);
+}
+$('#flavors').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-f]'); if(!b) return;
+  flavor=b.dataset.f; [...$('#flavors').children].forEach(x=>x.classList.toggle('on',x===b));
+  $('#flavorabout').textContent=ABOUT[flavor]; plan();
+});
+async function startBuild(dry){
+  $('#buildstate').textContent = dry?'dry run…':'building…';
+  $('#log').hidden=false;
+  const r=await fetch('/api/build?flavor='+flavor+(dry?'&dry=1':''),{method:'POST'});
+  const j=await r.json().catch(()=>({started:false}));
+  if(!j.started){ $('#buildstate').textContent='could not start: '+(j.error||'error'); return; }
+  if(poll) clearInterval(poll);
+  poll=setInterval(async()=>{
+    const t=await fetch('/api/log').then(r=>r.text()).catch(()=>'');
+    const el=$('#log'); const atBottom = el.scrollHeight-el.scrollTop-el.clientHeight < 40;
+    el.textContent=t; if(atBottom) el.scrollTop=el.scrollHeight;
+    if(/Done\.|build failed|config verification FAILED|no build performed/.test(t)){ clearInterval(poll); $('#buildstate').textContent='finished'; }
+  },1500);
+}
+$('#buildBtn').addEventListener('click',()=>startBuild(false));
+$('#dryBtn').addEventListener('click',()=>startBuild(true));
+detect(); plan();
+</script>
+</body>
+</html>

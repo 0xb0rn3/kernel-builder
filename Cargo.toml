@@ -1,0 +1,16 @@
+[package]
+name = "arxos-kernel-tuner"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-distro kernel tuner: CachyOS tunes + ARXOS hardening patches on Arch and Debian, with a GUI."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/0xb0rn3/kernel-builder"
+
+[[bin]]
+name = "akt"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

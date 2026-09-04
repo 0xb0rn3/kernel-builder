@@ -1,0 +1,4 @@
+# flavors/arxos.fragment — linux-arxos (the DEFAULT kernel, ships on the ISO, GRUB default).
+# Pinned + balanced. On the CachyOS base the posture is set by build.sh's env vars:
+#   _cpusched=bore  _use_llvm_lto=thin  _preempt=full  _hugepage=madvise  · pinned @ d96a067
+# Nothing flavor-specific to add; the base fragment (config.arxos.fragment) + those knobs define it.

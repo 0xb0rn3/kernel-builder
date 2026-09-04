@@ -1,0 +1,214 @@
+# config.arxos.fragment — ARXOS-specific config overlaid on the CachyOS base.
+# NOTE: since 2026-07-05 linux-arxos builds on CachyOS (not linux-zen). CachyOS's PKGBUILD env
+# vars already own the PERFORMANCE knobs — BORE (_cpusched), Clang ThinLTO (_use_llvm_lto),
+# BBRv3 (_tcp_bbr3), 1000Hz (_HZ_ticks), full preempt (_preempt), x86-64-v3 (_processor_opt),
+# MGLRU/zram/THP-madvise. So we do NOT set those here (setting them would OVERRIDE CachyOS via
+# merge_config). This fragment adds only the ARXOS-specific options CachyOS does not guarantee.
+# Traces to ArxOS_kernel.md §7-10 / qwen.md. Merged AFTER CachyOS prepare, then `make olddefconfig`.
+
+# ---- identity ----
+# NB: do NOT set CONFIG_LOCALVERSION here. build.sh renames the base's _pkgsuffix to "arxos", so
+# localversion.20-pkgname already yields "-arxos" (uname 7.1.3-1-arxos). Setting it again here
+# would double it to "-arxos-arxos".
+CONFIG_DEFAULT_HOSTNAME="arxos"
+
+# ---- LIVE PATCHING (ArxOS_kernel.md §8 — updater patches the kernel, no reboot) ----
+CONFIG_LIVEPATCH=y
+CONFIG_DYNAMIC_FTRACE=y
+CONFIG_FUNCTION_TRACER=y
+CONFIG_FTRACE_MCOUNT_RECORD=y
+
+# ---- kernel-level ANONYMITY for tools, esp. AnonKit (§9 / qwen.md) ----
+CONFIG_NETFILTER=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NETFILTER_NETLINK=y
+CONFIG_NETFILTER_NETLINK_QUEUE=y
+CONFIG_NETFILTER_XT_MATCH_OWNER=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_WIREGUARD=y
+CONFIG_NET_NS=y
+CONFIG_USER_NS=y
+CONFIG_KEYS=y
+CONFIG_PERSISTENT_KEYRINGS=y
+CONFIG_ENCRYPTED_KEYS=y
+
+# ---- droidB native device-IO core enablers (§6/§9) ----
+CONFIG_USB=y
+CONFIG_USB_ANNOUNCE_NEW_DEVICES=y
+CONFIG_USB_RAW_GADGET=m
+CONFIG_IO_URING=y
+
+# ---- disk crypto: LUKS-default + DEATHSTROKE-ENC prereqs (§9 / DEATHSTROKE.md §7, §10.1 A) ----
+# BLK_DEV_DM is =m in the base; dm-crypt therefore builds modular and the initramfs loads it
+# before unlocking root, which is what LUKS needs — no reason to force it built-in.
+CONFIG_DM_CRYPT=y
+CONFIG_CRYPTO_XTS=y
+CONFIG_CRYPTO_AES=y
+CONFIG_CRYPTO_AES_NI_INTEL=y
+CONFIG_CRYPTO_SHA256=y
+CONFIG_CRYPTO_USER_API_SKCIPHER=y
+
+# ---- anti-forensic base (§9 — primitives DEATHSTROKE builds on) ----
+CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y
+CONFIG_SLAB_MERGE_DEFAULT=n
+CONFIG_RANDOMIZE_BASE=y
+CONFIG_RANDOMIZE_MEMORY=y
+CONFIG_STRICT_KERNEL_RWX=y
+
+# ---- DEATHSTROKE kernel prerequisites (ArxOS_kernel.md §10.1) ----
+# The deathstr0ke toolkit runs on a stock kernel and degrades gracefully; these are the C/D
+# hardening options §10.1 says linux-arxos turns ON by default (the base leaves them off).
+# Verified 2026-09-04 against the effective built config: base already provides A (dm-crypt,
+# XTS/AES/SHA256, CRYPTO_USER_API, BLK_DEV_INITRD) and most of B2 (TCG_TPM/TIS/CRB,
+# HW_RANDOM_TPM, SECURITYFS, SECURITY_LOCKDOWN_LSM, SLAB_FREELIST_HARDENED). The lines below
+# are the remaining, verified-missing pieces.
+#
+# C — zero freed memory so the in-RAM LUKS master key ds-erase wipes cannot be scavenged from
+# a freed page by a cold-boot/DMA/forensic read. This is the single most load-bearing option
+# for the whole crypto-erase story; INIT_ON_ALLOC alone (base) does not cover the free path.
+CONFIG_INIT_ON_FREE_DEFAULT_ON=y
+# C — no plaintext key in a hibernation image. A swsusp image on unencrypted swap defeats the
+# crypto-erase (§10.1 C / DEATHSTROKE.md line 202). Suspend-to-RAM (CONFIG_SUSPEND) is separate
+# and stays on. olddefconfig drops the HIBERNATION_* dependents automatically.
+# CONFIG_HIBERNATION is not set
+# B2 — TPM measured boot. IMA measurement extends the boot chain into a PCR so the disk-unlock
+# secret can be sealed to our unmodified boot (forces an offline/foreign-boot adversary onto the
+# attempt-limited path). Measurement ONLY — appraisal/enforcement (IMA_APPRAISE) is deliberately
+# NOT enabled, so this never blocks boot; enforcement is opt-in via a loaded policy. The
+# systemd-stub UKI PCR path is the alternative the spec allows; this is belt-and-suspenders.
+CONFIG_INTEGRITY=y
+CONFIG_IMA=y
+CONFIG_IMA_MEASURE_PCR_IDX=10
+CONFIG_IMA_DEFAULT_HASH_SHA256=y
+# B2/D — make the lockdown LSM effective from early boot so `lockdown=confidentiality` (blocks
+# /dev/mem, kexec, DMA RAM-capture routes) applies from the start WHEN passed. We do NOT force
+# lockdown (no LOCK_DOWN_KERNEL_FORCE_*): forcing it without Secure Boot + signed modules would
+# break unsigned DKMS loads (chipsec/pfring/rtl drivers). Forced-confidentiality is deferred to
+# the hardened flavor + the signed-UKI work; on the default kernel lockdown stays runtime-opt-in.
+CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+
+# ---- droidB + anonkit: assessed, NO new kernel options required (verified 2026-09-04) ----
+# droidB — every USB mode usb/probe.rs classifies already binds in-tree: cdc-acm.c already
+# carries the MediaTek preloader IDs 0e8d:0003 + 0e8d:2000, and USB_ACM / USB_SERIAL_QUALCOMM /
+# USB_SERIAL_OPTION / USB_STORAGE are all =m below-or-in-base. Samsung download (04e8:685d) and
+# Qualcomm EDL (05c6:9008) are libusb/usbfs devices the flashers claim directly (kernel driver
+# detached), so their "recognition" is a udev/usbfs grant (droidB ships 51-droidB-android.rules),
+# NOT a kernel id_table entry. A source patch here would be redundant and is intentionally omitted.
+# anonkit — the atomic, process-independent kill-switch is an eBPF program (BPF-verifier-safe)
+# pinned at a fixed hook; the kernel already hosts every attach point it needs (CGROUP_BPF,
+# NETFILTER_BPF_LINK, NET_CLS_BPF, BPF_LSM/BTF below). The program itself lives in the anonkit
+# repo, not here. Asserted for traceability:
+CONFIG_CGROUP_BPF=y
+
+# ---- best-in-class hardening delta vs Kali/Parrot/mainstream (audited 2026-09-04) ----
+# The tuned base already MATCHES or beats those distros where it counts, so we deliberately do
+# NOT pad this file with redundant lines:
+#   * Wireless monitor/injection — every vendor family + injection driver is already on
+#     (ath9k/ath9k_htc, carl9170, rt2800usb, rtl8187, rtl8xxxu, mt76 mt7601u/mt76x2u/mt7921u,
+#     zd1211rw). That is Kali's in-kernel wireless posture; Kali's only extra is out-of-tree
+#     DKMS drivers (rtl8812au/8814au), which are a package/arsenal concern, not kernel config.
+#   * KSPP mainstream hardening — FORTIFY_SOURCE, HARDENED_USERCOPY, SLAB_FREELIST_RANDOM,
+#     SHUFFLE_PAGE_ALLOCATOR, INIT_STACK_ALL_ZERO, LIST_HARDENED, DEBUG_WX, VMAP_STACK,
+#     STACKPROTECTOR_STRONG are all already set by the base.
+# The ONE genuine, high-value gap for an anti-forensic distro: the IOMMU is compiled in
+# (INTEL_IOMMU/AMD_IOMMU=y) but NOT enforcing at boot, so DMA-remapping protection is off and
+# the box is exposed to DMA-based RAM capture (PCILeech, Thunderbolt/FireWire DMA) — the exact
+# "DMA-based RAM capture routes" DEATHSTROKE §10.1 D calls out, and what linux-hardened / Qubes /
+# Kicksecure default ON. Enforce it. Escape hatch stays at runtime (intel_iommu=off / iommu.strict=0)
+# for the rare device that needs it, so this is a safe default, not a lock-in.
+CONFIG_INTEL_IOMMU_DEFAULT_ON=y
+CONFIG_IOMMU_DEFAULT_DMA_STRICT=y
+# Restrict kernel-log access to root so kernel-pointer/layout leaks aren't readable by an
+# unprivileged local process (KSPP; Kicksecure/hardened default). Cheap, no perf cost.
+CONFIG_SECURITY_DMESG_RESTRICT=y
+
+# ---- privacy hooks: kill-camera / kill-location must be UNBINDABLE => modules (§9) ----
+CONFIG_USB_VIDEO_CLASS=m
+CONFIG_MEDIA_USB_SUPPORT=y
+CONFIG_GNSS=m
+CONFIG_USB_SERIAL_GARMIN=m
+
+# ---- radios: RF / Wi-Fi (injection) / Bluetooth (§8 / chatgpt.md §1) ----
+# Monitor-mode injection is native in modern mac80211 (7.x); legacy Kali patches, if ever needed,
+# go in patches/ and are applied by build.sh. carl9170 kept as a module for sniffer use.
+CONFIG_CFG80211=m
+CONFIG_MAC80211=m
+CONFIG_CFG80211_WEXT=y
+CONFIG_CARL9170=m
+CONFIG_BT=m
+CONFIG_RFKILL=m
+
+# ---- eBPF / BTF for defensive tooling + threat hunting (qwen.md) ----
+CONFIG_BPF_SYSCALL=y
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_BPF_JIT=y
+CONFIG_BPF_JIT_ALWAYS_ON=y
+
+# ---- transparent proxy + advanced netfilter (anonkit Tor redirect, mitmproxy, pentest FW) ----
+CONFIG_NETFILTER_XT_TARGET_TPROXY=m
+CONFIG_NFT_TPROXY=m
+CONFIG_NFT_NAT=m
+CONFIG_NFT_MASQ=m
+CONFIG_NFT_REDIR=m
+CONFIG_NETFILTER_XT_TARGET_NFQUEUE=m
+CONFIG_NF_CONNTRACK_FTP=m
+CONFIG_NF_CONNTRACK_IRC=m
+CONFIG_NF_NAT=m
+
+# ---- USB gadget + HID (keystroke-injection / BadUSB testing from the box itself) ----
+CONFIG_USB_GADGET=m
+CONFIG_USB_CONFIGFS=m
+CONFIG_USB_CONFIGFS_F_HID=y
+CONFIG_USB_DUMMY_HCD=m
+
+# ---- nested KVM (detonate malware / run analysis VMs inside ARXOS) ----
+CONFIG_KVM=m
+CONFIG_KVM_INTEL=m
+CONFIG_KVM_AMD=m
+CONFIG_VHOST_NET=m
+
+# ---- high-speed packet path for mass scanning + uprobes for live RE/instrumentation ----
+CONFIG_XDP_SOCKETS=y
+CONFIG_UPROBE_EVENTS=y
+# AF_PACKET raw capture/inject (nmap, masscan, tcpdump, scapy); tun/tap for VPN + Tor + anonkit.
+CONFIG_PACKET=y
+CONFIG_TUN=m
+
+# ---- DFIR / defensive forensics + EDR (blue team, incident response) ----
+# Matches the strong offense side with the defense/DFIR half:
+#   AUDIT -> auditd syscall/file forensic trail; FANOTIFY file-access monitoring (EDR/ransomware);
+#   KPROBES dynamic instrumentation (malware analysis, live RE, bpftrace); IKHEADERS for eBPF
+#   CO-RE tools (bpftrace/bcc/Falco); YAMA ptrace scope; LANDLOCK unprivileged sandboxing;
+#   BPF_LSM runtime policy hooks. (All ride the eBPF/BTF already enabled above.)
+CONFIG_AUDIT=y
+CONFIG_AUDITSYSCALL=y
+CONFIG_FANOTIFY=y
+CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_FUNCTION_GRAPH_TRACER=y
+CONFIG_IKHEADERS=m
+CONFIG_SECURITY_YAMA=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_BPF_LSM=y
+
+# ---- offense: namespace labs + hardware/RF/serial + automotive CAN (=m so idle stays light) ----
+# veth/bridge/macvlan build isolated pentest labs; USB serial covers RF/SDR + hardware-hacking
+# dongles and console cables; CAN is automotive / ICS pentest.
+CONFIG_VETH=m
+CONFIG_BRIDGE=m
+CONFIG_MACVLAN=m
+CONFIG_USB_SERIAL=m
+CONFIG_USB_SERIAL_FTDI_SIO=m
+CONFIG_USB_SERIAL_CP210X=m
+CONFIG_USB_SERIAL_PL2303=m
+CONFIG_CAN=m
+CONFIG_CAN_RAW=m
+CONFIG_CAN_DEV=m
+
+# ---- power efficiency: keep the host's low idle draw while adding all of the above ----
+# Every feature above is a module (=m), so it costs nothing until it is loaded. Add the
+# timer-events-oriented idle governor for a better latency/power trade at idle. The core
+# performance knobs stay owned by the tuned base, not overridden here.
+CONFIG_CPU_IDLE_GOV_TEO=y
