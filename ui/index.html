@@ -46,6 +46,21 @@ h1{font-family:var(--disp);font-style:italic;font-weight:700;font-size:2rem;marg
 .plan .out{color:var(--accent-hi);font-family:var(--mono);font-size:12.5px}
 .harden{display:flex;flex-wrap:wrap;gap:8px}
 .harden .h{font-family:var(--mono);font-size:11.5px;padding:5px 10px;border-radius:7px;border:1px solid rgba(78,195,122,.35);background:rgba(78,195,122,.08);color:#bfe9cf}
+.tin{font-family:var(--mono);font-size:13px;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:9px;color:var(--fg);padding:8px 12px;width:210px}
+.tin:focus{outline:0;border-color:var(--accent)}
+.mono{font-family:var(--mono)}
+.opts{display:flex;flex-direction:column;gap:10px}
+.opt{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:start}
+.opt .h{justify-self:start;font-family:var(--mono);font-size:11.5px;padding:5px 10px;border-radius:7px;border:1px solid rgba(78,195,122,.35);background:rgba(78,195,122,.08);color:#bfe9cf;white-space:nowrap}
+.opt .h.perf{border-color:rgba(232,112,42,.35);background:rgba(232,112,42,.09);color:#f4c19a}
+.opt .h.sec{border-color:rgba(82,148,226,.4);background:rgba(82,148,226,.1);color:#b8d4f5}
+.opt .mean{color:var(--muted);font-size:13px;line-height:1.45}
+@media(max-width:560px){.opt{grid-template-columns:1fr;gap:4px}}
+.opts3{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px}
+.opts3 label{display:flex;flex-direction:column;gap:6px;font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim)}
+.opts3 .tin{width:100%}
+.opts3 .hint{font-family:var(--sans);font-size:12px;text-transform:none;letter-spacing:0;color:var(--muted)}
+.opts3 .hint b{color:var(--accent-hi);font-weight:600}
 pre.log{background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:14px;margin:0;max-height:340px;overflow:auto;font-family:var(--mono);font-size:12px;color:#cfd2c8;white-space:pre-wrap;word-break:break-word}
 .muted{color:var(--muted)}.dim{color:var(--dim)}
 footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
@@ -79,6 +94,25 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
     </div>
   </div>
 
+  <div class="card">
+    <h2>Build options</h2>
+    <div class="opts3">
+      <label>Kernel name
+        <input id="kname" class="tin" type="text" value="arxos" spellcheck="false" autocomplete="off" maxlength="24">
+        <span class="hint">builds <b id="knamePreview" class="mono">linux-arxos</b>, yours, not branded</span>
+      </label>
+      <label>Version (revision)
+        <input id="pkgrel" class="tin" type="text" inputmode="numeric" placeholder="1 (default)" autocomplete="off" maxlength="6">
+        <span class="hint">package revision, blank leaves the default</span>
+      </label>
+      <label>Output path
+        <input id="outpath" class="tin" type="text" placeholder="build dir (default)" spellcheck="false" autocomplete="off">
+        <span class="hint">where the finished packages are written</span>
+      </label>
+    </div>
+    <div class="warn" id="optErr" hidden></div>
+  </div>
+
   <div class="card plan">
     <h2>Tune plan</h2>
     <dl>
@@ -91,12 +125,18 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
   </div>
 
   <div class="card">
-    <h2>Hardening delta (verified before every compile)</h2>
-    <div class="harden">
-      <span class="h">init_on_free</span><span class="h">init_on_alloc</span><span class="h">hibernation off</span>
-      <span class="h">IOMMU strict</span><span class="h">lockdown early</span><span class="h">IMA</span>
-      <span class="h">livepatch</span><span class="h">dmesg restrict</span>
-    </div>
+    <h2>Performance base &middot; what each tune does</h2>
+    <div class="opts" id="perfOpts"><span class="dim">…</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Hardening delta &middot; what each does (verified before every compile)</h2>
+    <div class="opts" id="hardOpts"><span class="dim">…</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Security / wireless auditing &middot; Kali-style</h2>
+    <div class="opts" id="secOpts"><span class="dim">…</span></div>
   </div>
 
   <div class="card">
@@ -118,10 +158,14 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
 
 <script>
 const $=s=>document.querySelector(s);
-let flavor='default', poll=null;
+let flavor='default', kname='arxos', pkgrel='', outpath='', poll=null;
 const ABOUT={default:'balanced daily driver (BORE + ThinLTO)', rt:'real-time (PREEMPT_RT + BORE)', hardened:'max security posture (KSPP + kCFI)'};
+const validName=s=>/^[a-z0-9][a-z0-9-]*$/.test(s)&&s.length<=24;
+const enc=encodeURIComponent;
+function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms);};}
 
 async function jget(u){ try{ const r=await fetch(u); return r.ok?r.json():null; }catch(e){ return null; } }
+function qs(){ let q='flavor='+flavor+'&name='+enc(kname); if(pkgrel) q+='&pkgrel='+enc(pkgrel); if(outpath) q+='&out='+enc(outpath); return q; }
 
 async function detect(){
   const d=await jget('/api/detect');
@@ -131,21 +175,44 @@ async function detect(){
   if(!d.supported){ $('#buildBtn').disabled=true; $('#buildBtn').style.opacity=.5; }
 }
 function fill(id,arr){ const el=$(id); el.innerHTML=''; (arr||[]).forEach(t=>{const s=document.createElement('span');s.textContent=t;el.appendChild(s);}); if(!arr||!arr.length){const s=document.createElement('span');s.className='dim';s.textContent='—';el.appendChild(s);} }
+function renderOpts(id,items,cls){ const el=$(id); el.innerHTML=''; (items||[]).forEach(it=>{ const d=document.createElement('div'); d.className='opt'; const c=document.createElement('span'); c.className='h'+(cls?' '+cls:''); c.textContent=it.option; const m=document.createElement('span'); m.className='mean'; m.textContent=it.meaning; d.append(c,m); el.appendChild(d); }); }
+
 async function plan(){
-  const p=await jget('/api/plan?flavor='+flavor);
+  const p=await jget('/api/plan?'+qs());
   if(!p) return;
   $('#p-base').textContent=p.base; $('#p-output').textContent=p.output;
   fill('#p-tunes',p.tunes); fill('#p-overlays',p.overlays); fill('#p-patches',p.patch_sets);
 }
+async function explain(){
+  const e=await jget('/api/explain?'+qs());
+  if(!e) return;
+  renderOpts('#perfOpts', e.performance, 'perf');
+  renderOpts('#hardOpts', e.hardening);
+  renderOpts('#secOpts', e.security, 'sec');
+}
+function refresh(){ plan(); explain(); }
+
 $('#flavors').addEventListener('click',e=>{
   const b=e.target.closest('button[data-f]'); if(!b) return;
   flavor=b.dataset.f; [...$('#flavors').children].forEach(x=>x.classList.toggle('on',x===b));
-  $('#flavorabout').textContent=ABOUT[flavor]; plan();
+  $('#flavorabout').textContent=ABOUT[flavor]; refresh();
 });
+$('#kname').addEventListener('input', debounce(()=>{
+  const v=$('#kname').value.trim().toLowerCase(); const err=$('#optErr');
+  if(!validName(v)){ err.textContent='kernel name: lowercase letters, digits and dashes only, no leading/trailing dash'; err.hidden=false; return; }
+  err.hidden=true; kname=v; $('#knamePreview').textContent='linux-'+v; refresh();
+},280));
+$('#pkgrel').addEventListener('input', debounce(()=>{
+  const v=$('#pkgrel').value.trim(); const err=$('#optErr');
+  if(v && !/^[0-9]+$/.test(v)){ err.textContent='version (revision) must be a number, or blank for the default'; err.hidden=false; return; }
+  err.hidden=true; pkgrel=v; refresh();
+},280));
+$('#outpath').addEventListener('input', debounce(()=>{ outpath=$('#outpath').value.trim(); refresh(); },280));
+
 async function startBuild(dry){
   $('#buildstate').textContent = dry?'dry run…':'building…';
   $('#log').hidden=false;
-  const r=await fetch('/api/build?flavor='+flavor+(dry?'&dry=1':''),{method:'POST'});
+  const r=await fetch('/api/build?'+qs()+(dry?'&dry=1':''),{method:'POST'});
   const j=await r.json().catch(()=>({started:false}));
   if(!j.started){ $('#buildstate').textContent='could not start: '+(j.error||'error'); return; }
   if(poll) clearInterval(poll);
@@ -158,7 +225,7 @@ async function startBuild(dry){
 }
 $('#buildBtn').addEventListener('click',()=>startBuild(false));
 $('#dryBtn').addEventListener('click',()=>startBuild(true));
-detect(); plan();
+detect(); refresh();
 </script>
 </body>
 </html>

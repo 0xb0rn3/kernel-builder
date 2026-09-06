@@ -45,7 +45,9 @@ fn handle(mut s: TcpStream) -> std::io::Result<()> {
         ("GET", "/api/plan") => {
             let fl = flavor(&q("flavor").unwrap_or_else(|| "default".into())).unwrap_or(&FLAVORS[0]);
             let name = crate::kernel_name(&q("name").unwrap_or_else(|| "arxos".into())).unwrap_or_else(|_| "arxos".into());
-            json(&mut s, &Plan::resolve(Distro::detect(), fl, &name).to_json())
+            let outq = q("out").filter(|s| !s.is_empty());
+            let rel = q("pkgrel").filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())).unwrap_or_else(|| "1".into());
+            json(&mut s, &Plan::resolve(Distro::detect(), fl, &name, outq.as_deref(), &rel).to_json())
         }
         ("GET", "/api/explain") => {
             let fl = flavor(&q("flavor").unwrap_or_else(|| "default".into())).unwrap_or(&FLAVORS[0]);
@@ -55,6 +57,8 @@ fn handle(mut s: TcpStream) -> std::io::Result<()> {
         ("POST", "/api/build") => {
             let fl = q("flavor").unwrap_or_else(|| "default".into());
             let name = q("name");
+            let outq = q("out").filter(|s| !s.is_empty());
+            let rel = q("pkgrel").filter(|s| !s.is_empty());
             let dry = q("dry").as_deref() == Some("1");
             let exe = std::env::current_exe().unwrap_or_default();
             match std::fs::File::create(LOG) {
@@ -63,6 +67,8 @@ fn handle(mut s: TcpStream) -> std::io::Result<()> {
                     let mut c = Command::new(exe);
                     c.arg("build").arg("--flavor").arg(&fl);
                     if let Some(n) = &name { c.arg("--name").arg(n); }
+                    if let Some(o) = &outq { c.arg("--out").arg(o); }
+                    if let Some(r) = &rel { c.arg("--pkgrel").arg(r); }
                     if dry { c.arg("--dry-run"); }
                     c.stdout(Stdio::from(out)).stderr(Stdio::from(err));
                     match c.spawn() {

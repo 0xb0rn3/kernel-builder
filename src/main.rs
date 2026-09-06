@@ -57,6 +57,8 @@ pub struct Plan {
     pub distro: Distro,
     pub flavor: &'static Flavor,
     pub kname: String,         // kernel name -> linux-<kname> (default "arxos"; set with --name / --rename)
+    pub out: Option<String>,   // output dir for the finished packages (default: the build dir); --out
+    pub pkgrel: String,        // package revision / custom version (default "1"); --pkgrel
     pub base: String,          // upstream base we fork/patch
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
@@ -65,22 +67,24 @@ pub struct Plan {
 }
 
 impl Plan {
-    pub fn resolve(distro: Distro, fl: &'static Flavor, kname: &str) -> Plan {
+    pub fn resolve(distro: Distro, fl: &'static Flavor, kname: &str, out: Option<&str>, pkgrel: &str) -> Plan {
         let dd = data_dir();
         let arxos_frag = dd.join("config/arxos.fragment").display().to_string();
         match distro {
             Distro::Arch => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
+                out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
                 base: "CachyOS linux-cachyos (rolling latest)".into(),
                 tunes: vec![
                     format!("CachyOS env knobs: _cpusched={}, _use_llvm_lto={}, BBRv3, 1000Hz, x86-64-v3, THP", fl.sched, fl.lto),
                 ],
                 overlays: vec![arxos_frag],
                 patch_sets: vec![dd.join("patches/arxos").display().to_string()],
-                output: format!("pacman package  linux-{kname}  (+ headers)"),
+                output: format!("pacman package  linux-{kname} rev {pkgrel}  (+ headers){}", out.map(|o| format!("  ->  {o}")).unwrap_or_default()),
             },
             Distro::Debian => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
+                out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
                 base: "Debian kernel source (apt source / linux-source)".into(),
                 tunes: vec![
                     "CachyOS tunes ported to a Kconfig fragment: BORE (or EEVDF), BBRv3, 1000Hz, full preempt, MGLRU, THP".into(),
@@ -91,10 +95,11 @@ impl Plan {
                     dd.join("patches/arxos").display().to_string(),
                     dd.join("patches/kali").display().to_string(),
                 ],
-                output: format!("Debian packages  linux-image-*-{kname}.deb  +  linux-headers-*.deb"),
+                output: format!("Debian packages  linux-image-*-{kname}.deb  +  linux-headers-*.deb{}", out.map(|o| format!("  ->  {o}")).unwrap_or_default()),
             },
             Distro::Unknown => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
+                out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
                 base: "unknown host".into(), tunes: vec![], overlays: vec![], patch_sets: vec![],
                 output: "unsupported — akt supports Arch-family and Debian-family hosts".into(),
             },
@@ -106,8 +111,8 @@ impl Plan {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"output\":\"{}\"}}",
-            self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.base),
+            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"output\":\"{}\"}}",
+            self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")), json_escape(&self.base),
             arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), json_escape(&self.output))
     }
 }
@@ -138,6 +143,11 @@ fn main() -> ExitCode {
         Ok(n) => n,
         Err(e) => { eprintln!("akt: {e}"); return ExitCode::FAILURE; }
     };
+    let out = flag(&args, "--out").map(|s| s.to_string());
+    let pkgrel = flag(&args, "--pkgrel").unwrap_or("1").to_string();
+    if pkgrel.is_empty() || !pkgrel.chars().all(|c| c.is_ascii_digit()) {
+        eprintln!("akt: --pkgrel must be a number (the package revision / version, default 1)"); return ExitCode::FAILURE;
+    }
 
     match cmd {
         "detect" => {
@@ -154,7 +164,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "plan" => {
-            let p = Plan::resolve(Distro::detect(), fl, &kname);
+            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel);
             if json { println!("{}", p.to_json()); }
             else {
                 println!("== akt tune plan ({}, flavor {}) ==", p.distro.name(), p.flavor.key);
@@ -172,7 +182,7 @@ fn main() -> ExitCode {
         }
         "build" => {
             let dry = has_flag(&args, "--dry-run");
-            match build::run(Plan::resolve(Distro::detect(), fl, &kname), dry) {
+            match build::run(Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel), dry) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: build failed: {e}"); ExitCode::FAILURE }
             }
@@ -200,9 +210,11 @@ fn usage() -> String {
 
   detect                 show the host distro + which build path applies
   plan   [--flavor F]    print the tune plan (base, tunes, patches) without building
-  build  [--flavor F] [--name NAME] [--dry-run]
+  build  [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--dry-run]
                          build a tuned kernel for this host
-                         --name / --rename builds linux-<NAME> (default: arxos)
+                         --name / --rename  builds linux-<NAME> (default: arxos)
+                         --pkgrel N         package revision / custom version (default: 1)
+                         --out DIR          write the finished packages to DIR
   explain [--flavor F] [--name NAME]
                          explain what each option means for your custom kernel
   gate   <config-file>   verify the ARXOS hardening delta is present in a built .config

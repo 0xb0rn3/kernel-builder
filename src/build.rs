@@ -102,7 +102,7 @@ fn build_arch(p: &Plan) -> io::Result<()> {
         ("_HZ_ticks", "1000"), ("_tcp_bbr3", "yes"), ("_processor_opt", "GENERIC_V3"),
         ("_cpusched", p.flavor.sched), ("_use_llvm_lto", p.flavor.lto), ("_preempt", "full"),
         ("_build_zfs", "no"), ("_build_nvidia_open", "no"), ("_cachy_config", "yes"),
-        ("PACKAGER", "ARXOS <team@arxos.uk>"), ("ARXOS_PKGREL", "1"), ("KNAME", p.kname.as_str()),
+        ("PACKAGER", "ARXOS <team@arxos.uk>"), ("ARXOS_PKGREL", p.pkgrel.as_str()), ("KNAME", p.kname.as_str()),
     ];
 
     // 2. de-brand + pkgrel (matches linux-arxos build.sh).
@@ -136,6 +136,10 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     // tidy the output dir: keep only what we just built, archive superseded versions into prev/.
     println!("\nDone.");
     let _ = step("tidy output dir", basep, &[("KNAME", p.kname.as_str())], TIDY_ARCH);
+    if let Some(dir) = &p.out {
+        step(&format!("move packages -> {dir}"), basep, &[("OUT", dir.as_str()), ("KNAME", p.kname.as_str())],
+            "mkdir -p \"$OUT\" && mv -f linux-$KNAME*.pkg.tar.* \"$OUT\"/ 2>/dev/null && echo \"  moved to $OUT\" || echo \"  (nothing to move)\"")?;
+    }
     println!("Install with:  sudo pacman -U <pkg>   (verify + boot-test in a throwaway VM first)");
     Ok(())
 }
@@ -190,7 +194,11 @@ fn build_debian(p: &Plan) -> io::Result<()> {
         "make -j\"$(nproc)\" LOCALVERSION=-$KNAME bindeb-pkg")?;
     // tidy: keep this build's .debs, archive superseded older-version arxos .debs into prev/.
     let _ = step("[6/6] built packages + tidy output dir", workp, &[("KNAME", p.kname.as_str())], TIDY_DEBIAN);
-    println!("Install with:  sudo dpkg -i linux-image-*-arxos.deb linux-headers-*.deb   (boot-test first)");
+    if let Some(dir) = &p.out {
+        step(&format!("move packages -> {dir}"), workp, &[("OUT", dir.as_str()), ("KNAME", p.kname.as_str())],
+            "mkdir -p \"$OUT\" && mv -f linux-*-$KNAME*.deb \"$OUT\"/ 2>/dev/null && echo \"  moved to $OUT\" || true")?;
+    }
+    println!("Install with:  sudo dpkg -i linux-image-*-{}.deb linux-headers-*.deb   (boot-test first)", p.kname);
     Ok(())
 }
 

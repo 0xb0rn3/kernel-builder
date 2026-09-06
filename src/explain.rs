@@ -26,9 +26,14 @@ pub const HARDEN: &[Item] = &[
     Item { key: "livepatch", what: "Apply security fixes to the running kernel without a reboot." },
 ];
 
-/// Applied on the Debian build path only.
-pub const KALI: &[Item] = &[
-    Item { key: "wireless injection", what: "Kali-style patches so Wi-Fi adapters support monitor mode and frame injection for wireless auditing." },
+/// Security / wireless-auditing capabilities (Kali-style). On Arch these live in the ARXOS config
+/// fragment; on the Debian path they are added as Kali patches. Present on both build paths.
+pub const SECURITY: &[Item] = &[
+    Item { key: "wireless injection", what: "Wi-Fi adapters can enter monitor mode and inject frames, so aircrack-ng and the wireless-audit suite work (the core Kali capability)." },
+    Item { key: "extra Wi-Fi drivers", what: "Injection-capable out-of-tree Realtek/Atheros chipset drivers, covering adapters mainline does not." },
+    Item { key: "USB HID / BadUSB", what: "Raw USB HID gadget support for keystroke-injection testing and hardware security work." },
+    Item { key: "netfilter NFQUEUE", what: "NFNETLINK_QUEUE lets security tools intercept, inspect and rewrite packets in the kernel path (also what AnonKit builds on)." },
+    Item { key: "eBPF + BTF", what: "In-kernel programmable tracing and filtering for observability and defensive tooling, with CO-RE type info." },
 ];
 
 fn json_arr(items: &[Item]) -> String {
@@ -39,11 +44,10 @@ fn json_arr(items: &[Item]) -> String {
 }
 
 /// The same meaning table as a JSON object (drives the GUI's /api/explain).
-pub fn as_json(distro: Distro, fl: &Flavor, kname: &str) -> String {
-    format!("{{\"kernel\":\"linux-{}\",\"flavor\":{{\"key\":\"{}\",\"meaning\":\"{}\"}},\"performance\":{},\"hardening\":{},\"debian_extra\":{}}}",
+pub fn as_json(_distro: Distro, fl: &Flavor, kname: &str) -> String {
+    format!("{{\"kernel\":\"linux-{}\",\"flavor\":{{\"key\":\"{}\",\"meaning\":\"{}\"}},\"performance\":{},\"hardening\":{},\"security\":{}}}",
         crate::json_escape(kname), fl.key, crate::json_escape(fl.about),
-        json_arr(PERF), json_arr(HARDEN),
-        if distro == Distro::Debian { json_arr(KALI) } else { "[]".to_string() })
+        json_arr(PERF), json_arr(HARDEN), json_arr(SECURITY))
 }
 
 /// Print the meaning of everything that will go into `linux-<kname>` for this host + flavor.
@@ -57,6 +61,6 @@ pub fn print(distro: Distro, fl: &Flavor, kname: &str, json: bool) {
     };
     grp("PERFORMANCE  (the tuned base, every flavor)", PERF);
     grp("HARDENING  (ARXOS / DEATHSTROKE delta)", HARDEN);
-    if distro == Distro::Debian { grp("DEBIAN EXTRAS", KALI); }
+    grp("SECURITY / WIRELESS AUDITING  (Kali-style)", SECURITY);
     println!("\n  name: installs as linux-{kname}; `uname -r` shows -{kname}. Change it with --name NAME.");
 }
