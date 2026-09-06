@@ -74,7 +74,9 @@ sudo ./install.sh          # installs the prebuilt akt binary + tunes, patches, 
 ```
 
 The release also ships the bare `akt` binary on its own, enough for `akt detect` / `plan` /
-`explain` / `gui` (the GUI is embedded in the binary).
+`explain` / `gui` (the GUI is embedded in the binary). For maximum portability across any Linux
+(any glibc), use the **`-musl`** static build (`akt-x86_64-linux-musl`, or the `*-musl.tar.gz`
+bundle); the plain build is smaller but needs a recent glibc.
 
 ### From source (manual compile)
 
