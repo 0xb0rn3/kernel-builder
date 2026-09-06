@@ -4,11 +4,18 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 S=""; [ "$(id -u)" -ne 0 ] && S=sudo
 
-echo ">> building (cargo build --release)"
-( cd "$HERE" && cargo build --release )
+if [ -x "$HERE/akt" ]; then
+  BIN="$HERE/akt"; echo ">> using the prebuilt akt binary (release tarball)"
+elif [ -x "$HERE/target/release/akt" ]; then
+  BIN="$HERE/target/release/akt"; echo ">> using the already-built akt binary"
+elif command -v cargo >/dev/null 2>&1; then
+  echo ">> building from source (cargo build --release)"; ( cd "$HERE" && cargo build --release ); BIN="$HERE/target/release/akt"
+else
+  echo "!! no prebuilt akt binary here and no cargo installed — install rust, or download the release tarball."; exit 1
+fi
 
 echo ">> installing binary + bundled data"
-$S install -Dm755 "$HERE/target/release/akt" /usr/local/bin/akt
+$S install -Dm755 "$BIN" /usr/local/bin/akt
 $S install -d /usr/share/kernel-builder/config /usr/share/kernel-builder/patches/arxos \
               /usr/share/kernel-builder/patches/kali /usr/share/kernel-builder/ui
 $S cp -f  "$HERE"/config/*.fragment                 /usr/share/kernel-builder/config/       2>/dev/null || true

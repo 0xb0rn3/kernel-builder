@@ -63,14 +63,29 @@ log. It matches the ArxOS Control Center design language.
 
 ## Install
 
+### Prebuilt binary release (no compiler needed)
+
+Grab the latest build from **[Releases](https://github.com/0xb0rn3/kernel-builder/releases)**:
+
+```sh
+tar xzf kernel-builder-*-x86_64-linux.tar.gz
+cd kernel-builder
+sudo ./install.sh          # installs the prebuilt akt binary + tunes, patches, GUI
+```
+
+The release also ships the bare `akt` binary on its own, enough for `akt detect` / `plan` /
+`explain` / `gui` (the GUI is embedded in the binary).
+
+### From source (manual compile)
+
 ```sh
 git clone https://github.com/0xb0rn3/kernel-builder
 cd kernel-builder
-sudo ./install.sh          # cargo build --release + install binary, tunes, patches, GUI
+sudo ./install.sh          # cargo build --release, then installs the binary + data
 ```
 
-Needs `rust`/`cargo` to build, and the host's kernel-build toolchain (Arch: `base-devel` + `clang`
-`lld` `llvm`; Debian: `build-essential fakeroot libncurses-dev bison flex libssl-dev libelf-dev`).
+Compiling needs `rust`/`cargo`. Building a kernel then needs the host's toolchain (Arch: `base-devel`
+`clang` `lld` `llvm`; Debian: `build-essential fakeroot libncurses-dev bison flex libssl-dev libelf-dev`).
 
 ## Adding patches
 
