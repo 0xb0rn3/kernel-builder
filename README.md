@@ -40,6 +40,7 @@ multi-hour compile. `akt gate <config>` runs the same check standalone.
 
 ```sh
 akt detect                 # host distro + which build path applies
+akt resources --json       # CPU/RAM/disk plan, using AKT_WORK or current directory
 akt explain                # what each option means for your custom kernel
 akt plan                   # print the tune plan (base, tunes, patches), no build
 akt build                  # build a tuned kernel for this host
@@ -54,6 +55,28 @@ Flavors: `default` (BORE + ThinLTO), `rt` (PREEMPT_RT), `hardened` (KSPP + kCFI)
 with `--name NAME` (builds `linux-NAME`; default `arxos`), so it is yours, not branded. `akt explain`
 describes every performance and hardening option that goes into the build, in plain English, before
 you commit to a long compile. Add `--json` to `detect` / `plan` / `explain` / `gate` for scripting.
+
+## Automatic build resources
+
+Both build paths size jobs from available CPU parallelism (including affinity and
+CPU quotas) and available RAM. The planner also checks visible cgroup v2 memory
+limits at every ancestor and requires 60 GiB free on the work filesystem.
+It leaves one logical CPU when possible, reserves up to 4 GiB RAM, budgets
+2 GiB per compiler job, and caps ThinLTO backends at four. Swap is not counted.
+Use `AKT_MAX_JOBS=2 akt build` to lower the cap; it cannot exceed detection.
+`AKT_WORK=/path/to/work akt resources --json` inspects that filesystem.
+Detection runs before preparation and again before compilation. It is a snapshot,
+not an OOM guarantee or continuous load controller. Large kernels can need more
+than the disk floor. Unsupported cgroup layouts fail with an explanation.
+
+The Arch recipe's explicit job flags and Debian make command use the computed
+limit. ThinLTO flags are appended to the prepared kernel Makefile without replacing
+architecture linker flags. Unknown recipe or ThinLTO layouts stop for review.
+The planner is std-only Rust, embedded in `akt`, and shared with the private
+distribution builder. The GUI uses this same build engine.
+
+This resource update does not certify the existing rolling recipe, patch-skip
+policy, package output cleanup, Debian kernel build, or resulting kernel runtime.
 
 ## GUI
 

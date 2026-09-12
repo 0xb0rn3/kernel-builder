@@ -1,7 +1,7 @@
 // The build engine. Orchestrates the documented linux-arxos flow for each host. Every external step
 // is a shell command run with inherited stdio (live output). The config stage HARD-VERIFIES the
 // ARXOS delta before the multi-hour compile, so a stripped option aborts here, not after hours.
-use crate::{data_dir, gate, Distro, Plan};
+use crate::{data_dir, gate, resources, Distro, Plan};
 use std::io;
 use std::path::Path;
 use std::process::Command;
@@ -74,6 +74,8 @@ pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
     }
     print_plan(&plan);
     if dry {
+        let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/{}-{}", data_dir().display(), plan.distro.name(), plan.flavor.key));
+        resources::detect(Path::new(&work))?.report();
         println!("[dry-run] no build performed. Re-run without --dry-run to build.");
         return Ok(());
     }
@@ -90,6 +92,9 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
     let frag = dd.join("config/arxos.fragment");
+    let initial = resources::detect(workp)?;
+    initial.report();
+    let jobs = initial.jobs.to_string();
 
     // 1. fetch the CachyOS recipe (rolling latest).
     step("[1/5] fetch CachyOS linux-cachyos", workp, &[],
@@ -103,7 +108,9 @@ fn build_arch(p: &Plan) -> io::Result<()> {
         ("_cpusched", p.flavor.sched), ("_use_llvm_lto", p.flavor.lto), ("_preempt", "full"),
         ("_build_zfs", "no"), ("_build_nvidia_open", "no"), ("_cachy_config", "yes"),
         ("PACKAGER", "ARXOS <team@arxos.uk>"), ("ARXOS_PKGREL", p.pkgrel.as_str()), ("KNAME", p.kname.as_str()),
+        ("ARXOS_BUILD_JOBS", jobs.as_str()),
     ];
+    resources::limit_recipe(&basep.join("PKGBUILD"))?;
 
     // 2. de-brand + pkgrel (matches linux-arxos build.sh).
     step(&format!("[2/5] de-brand recipe -> linux-{}", p.kname), basep, &env,
@@ -132,7 +139,13 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     }
 
     // 5. build (-f overwrites a stale same-version pkg from a prior, e.g. wrong-config, build).
-    step("[5/5] compile (ThinLTO — long)", basep, &env, "makepkg -e -f --skipinteg --nodeps --noconfirm")?;
+    let current = resources::detect(workp)?;
+    current.report();
+    resources::limit_kernel(Path::new(&kdir), current.link_jobs)?;
+    let jobs = current.jobs.to_string();
+    let mut compile_env = env.to_vec();
+    compile_env.push(("ARXOS_BUILD_JOBS", jobs.as_str()));
+    step("[5/5] compile (ThinLTO — long)", basep, &compile_env, "makepkg -e -f --skipinteg --nodeps --noconfirm")?;
     // tidy the output dir: keep only what we just built, archive superseded versions into prev/.
     println!("\nDone.");
     let _ = step("tidy output dir", basep, &[("KNAME", p.kname.as_str())], TIDY_ARCH);
@@ -152,6 +165,7 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     let frag = dd.join("config/arxos.fragment");
     let kali = dd.join("patches/kali");
     let arxp = dd.join("patches/arxos");
+    resources::detect(workp)?.report();
 
     // 1. Debian kernel source. `linux-source` (from the distro) is the reproducible route; the git
     //    tree is the alternative. We take the distro source so the .deb tooling matches the host.
@@ -190,8 +204,12 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     }
 
     // 4. build .deb packages.
-    step("[5/6] build .deb (long)", srcp, &[("KNAME", p.kname.as_str())],
-        "make -j\"$(nproc)\" LOCALVERSION=-$KNAME bindeb-pkg")?;
+    let current = resources::detect(workp)?;
+    current.report();
+    resources::limit_kernel(srcp, current.link_jobs)?;
+    let jobs = current.jobs.to_string();
+    step("[5/6] build .deb (long)", srcp, &[("KNAME", p.kname.as_str()), ("ARXOS_BUILD_JOBS", jobs.as_str())],
+        "make -j\"${ARXOS_BUILD_JOBS:?}\" LOCALVERSION=-$KNAME bindeb-pkg")?;
     // tidy: keep this build's .debs, archive superseded older-version arxos .debs into prev/.
     let _ = step("[6/6] built packages + tidy output dir", workp, &[("KNAME", p.kname.as_str())], TIDY_DEBIAN);
     if let Some(dir) = &p.out {

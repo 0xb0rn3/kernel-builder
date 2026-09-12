@@ -10,6 +10,7 @@ mod build;
 mod explain;
 mod gate;
 mod server;
+mod resources;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -150,6 +151,13 @@ fn main() -> ExitCode {
     }
 
     match cmd {
+        "resources" => {
+            let work = std::env::var("AKT_WORK").unwrap_or_else(|_| ".".into());
+            match resources::detect(std::path::Path::new(&work)) {
+                Ok(r) => { if json { println!("{}", r.json()); } else { r.report(); } ExitCode::SUCCESS }
+                Err(e) => { eprintln!("akt: resources: {e}"); ExitCode::FAILURE }
+            }
+        }
         "detect" => {
             let d = Distro::detect();
             if json { println!("{{\"distro\":\"{}\",\"supported\":{}}}", d.name(), d != Distro::Unknown); }
@@ -209,6 +217,7 @@ fn usage() -> String {
 "akt {VERSION} — ARXOS Kernel Tuner
 
   detect                 show the host distro + which build path applies
+  resources [--json]      inspect build CPU, RAM and disk limits (AKT_WORK path)
   plan   [--flavor F]    print the tune plan (base, tunes, patches) without building
   build  [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--dry-run]
                          build a tuned kernel for this host
