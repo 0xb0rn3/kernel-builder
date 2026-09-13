@@ -4,7 +4,7 @@
 
 **A tuned, hardened kernel on Arch or Debian, in one tool.**
 
-CachyOS performance tunes · ARXOS hardening / DEATHSTROKE config · Kali wireless patches (Debian) · GUI
+Performance tuning · Kernel hardening · Resource-aware builds · Local GUI
 
 <sub>An <a href="https://arxos.uk">ArxOS</a> tool by <a href="https://stingraylabs.pages.dev">Stingray Labs</a>.</sub>
 
@@ -12,22 +12,22 @@ CachyOS performance tunes · ARXOS hardening / DEATHSTROKE config · Kali wirele
 
 ## What it does
 
-`akt` builds a performance-tuned, security-hardened kernel for whatever host you run it on, and
-verifies the hardening actually landed **before** the long compile.
+`akt` orchestrates tuned kernel builds on supported Arch-family and Debian-family
+Linux hosts. It checks required configuration before the long compile. A passing
+configuration check is not runtime or security certification.
 
 - **Arch family** (Arch, CachyOS, EndeavourOS, ...): forks the CachyOS `linux-cachyos` recipe
   (BORE, Clang ThinLTO, BBRv3, 1000 Hz, x86-64-v3), overlays the ARXOS config fragment + patches,
   and builds a pacman package `linux-arxos` (+ headers).
-- **Debian family** (Debian, Ubuntu, Kali): takes the Debian kernel source, applies CachyOS-style
-  tunes as a Kconfig fragment, then the same ARXOS hardening delta, then **Kali-style wireless
-  injection patches**, and builds `linux-image-*-arxos.deb` (+ headers) so Debian users get the same
-  tuned, hardened kernel.
+- **Debian family** (Debian, Ubuntu, Kali): takes Debian kernel source, requests
+  tuning and hardening options, accepts optional local patches, and builds
+  `linux-image-*-arxos.deb` (+ headers). Available options depend on the source;
+  a configuration request does not add a missing scheduler or networking patch.
 
-The ARXOS hardening delta (the "our patches" part) is the same one `linux-arxos` ships:
-`init_on_free` + `init_on_alloc` (zero freed/allocated memory so keys can't be scavenged),
-**hibernation off** (no plaintext key in swsusp), **IOMMU enforcing + strict** (anti-DMA RAM
-capture), **lockdown LSM early**, **IMA** measured boot, **livepatch**, **dmesg restrict**. It is the
-kernel side of the [deathstr0ke](https://github.com/0xb0rn3/deathstr0ke) anti-forensics toolkit.
+The hardening overlay requests allocation/free memory initialization, disabled
+hibernation, strict IOMMU defaults, early lockdown LSM, IMA, livepatch capability,
+and restricted kernel logs. These controls have platform and policy limits;
+they do not guarantee protection against every form of memory capture.
 
 ## The config gate (why this exists)
 
@@ -46,7 +46,7 @@ akt plan                   # print the tune plan (base, tunes, patches), no buil
 akt build                  # build a tuned kernel for this host
 akt build --name mykernel  # rename the kernel: builds linux-mykernel (default: linux-arxos)
 akt build --flavor rt      # real-time flavor (PREEMPT_RT + BORE)
-akt build --dry-run        # show the exact steps without building
+akt build --dry-run        # show the plan and check resources without building
 akt gate path/to/.config   # verify the hardening delta is present
 akt gui                    # local web GUI at http://127.0.0.1:8787
 ```
@@ -72,8 +72,18 @@ than the disk floor. Unsupported cgroup layouts fail with an explanation.
 The Arch recipe's explicit job flags and Debian make command use the computed
 limit. ThinLTO flags are appended to the prepared kernel Makefile without replacing
 architecture linker flags. Unknown recipe or ThinLTO layouts stop for review.
-The planner is std-only Rust, embedded in `akt`, and shared with the private
-distribution builder. The GUI uses this same build engine.
+The planner is std-only Rust, embedded in `akt`, and shared with the distribution
+builder. The GUI uses this same build engine. `akt plan` describes the feature
+plan; `akt resources` inspects resource limits without starting a build.
+
+```sh
+AKT_WORK=/path/to/kernel-work akt resources --json
+AKT_WORK=/path/to/kernel-work AKT_MAX_JOBS=2 akt build --dry-run
+AKT_WORK=/path/to/kernel-work AKT_MAX_JOBS=2 akt build
+```
+
+The work filesystem must exist or have an existing parent with enough free space.
+Automatic resource detection currently requires Linux cgroup v2.
 
 This resource update does not certify the existing rolling recipe, patch-skip
 policy, package output cleanup, Debian kernel build, or resulting kernel runtime.
@@ -87,6 +97,11 @@ log. It matches the ArxOS Control Center design language.
 ## Install
 
 ### Prebuilt binary release (no compiler needed)
+
+The September 13 resource-planner update is available in source on `main`.
+No new binary release was published with that update. Older release binaries
+may not contain `akt resources` or the automatic job limits; build current source
+to use these changes now.
 
 Grab the latest build from **[Releases](https://github.com/0xb0rn3/kernel-builder/releases)**:
 
@@ -106,7 +121,8 @@ bundle); the plain build is smaller but needs a recent glibc.
 ```sh
 git clone https://github.com/0xb0rn3/kernel-builder
 cd kernel-builder
-sudo ./install.sh          # cargo build --release, then installs the binary + data
+cargo build --release     # compile on the host, without root
+sudo ./install.sh          # install the freshly built binary + data
 ```
 
 Compiling needs `rust`/`cargo`. Building a kernel then needs the host's toolchain (Arch: `base-devel`
@@ -114,18 +130,25 @@ Compiling needs `rust`/`cargo`. Building a kernel then needs the host's toolchai
 
 ## Adding patches
 
-- `patches/arxos/*.patch` — applied on every host (after the config overlay).
-- `patches/kali/*.patch` — applied on the Debian path only (wireless injection, extra HID, ...).
-- `config/arxos.fragment` — the Kconfig overlay (the hardening delta). Edit here to change the tune.
+- `patches/arxos/*.patch`: optional local source patches for both build paths.
+- `patches/kali/*.patch`: optional local source patches for the Debian path only.
+- `config/arxos.fragment`: the bundled hardening configuration overlay.
+
+The two patch directories currently contain README files only. No additional
+wireless, scheduler, or distribution emergency-backport series is bundled there.
+The build engine applies supplied patches before its final configuration overlay.
 
 Patches are applied `--forward` and skipped (never fatal) if they don't apply on the current base.
 
 ## Status
 
-MVP. The core orchestration, the config gate, and the GUI are implemented; the Arch path mirrors the
-proven `linux-arxos` build. End-to-end builds are long and, for the Debian path, need validation on a
-real Debian/Kali host. Always boot-test a built kernel in a throwaway VM before installing on
-hardware.
+Development tool. Resource management was added in source commit `91dffc6`.
+Host compilation succeeded; eight Rust unit tests and six integration checks
+passed in a disposable QEMU/KVM VM. See [test evidence](tests/VALIDATION.md).
+
+This does not establish end-to-end Arch/Debian build success, boot safety,
+performance gains, or hardware support. Compile on the host; run regression,
+installation and runtime acceptance in a throwaway VM before hardware use.
 
 ## License
 

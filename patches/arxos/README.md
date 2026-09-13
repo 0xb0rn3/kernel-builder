@@ -1,3 +1,6 @@
 # ARXOS kernel patches
 
-Source `.patch` files applied on every build path (after the config overlay).
+Optional local `.patch` files for both build paths. This directory currently
+contains no patches. The build engine applies supplied files in filename order,
+before the final configuration overlay. Failed applications are currently
+skipped, not fatal; review the log before accepting any resulting kernel.

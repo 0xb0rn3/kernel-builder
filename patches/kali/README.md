@@ -1,4 +1,6 @@
 # Kali / Debian-user kernel patches
 
-Drop-in `.patch` files applied on the Debian build path (wireless injection, extra HID, etc.).
-Applied after the CachyOS tunes and the ARXOS fragment. Skipped-if-unappliable, never fatal.
+Optional local `.patch` files for the Debian build path. This directory currently
+contains no patches; its name does not mean wireless or other features are bundled.
+Supplied files run after the tuning step and before the final configuration
+overlay. Failed applications are currently skipped, not fatal; inspect the log.
