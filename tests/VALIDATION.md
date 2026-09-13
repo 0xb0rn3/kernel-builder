@@ -1,5 +1,26 @@
 # Resource planner validation, 2026-09-13
 
+## Binary release v0.1.1
+
+Native glibc and static musl x86-64 Linux release binaries compiled on the host.
+The musl binary is static PIE with no ELF interpreter. Both exact binaries and
+their installer bundles passed `release-vm.py` in the same disposable VM:
+four test methods with both ABI subcases, 1.233 seconds, exit 0.
+
+Checks cover all four asset hashes, safe bundle paths, matching standalone and
+bundled binary bytes, version 0.1.1, help, detect/plan/resources JSON, dry-run,
+invalid-config refusal, installer syntax, and actual installation of both
+bundles. Installed binary/data bytes and desktop entry were verified. No kernel
+build or toolkit operation ran in the guest. Shutdown requested after export.
+
+This is CLI and installer validation on one Arch-family VM, not a full GUI,
+Debian build, physical hardware or kernel runtime acceptance test.
+
+Repeat with `AKT_RELEASE_DIR=/path/to/assets python3 tests/release-vm.py` as root
+inside the named throwaway VM with its work disk mounted at `/mnt/kernelbuild`.
+
+## Resource implementation checks
+
 Host compilation: `cargo build --release` and
 `rustc --edition=2021 --test src/resources.rs -o resources-tests` succeeded.
 Execution target: disposable QEMU/KVM arxos-throwaway, UUID

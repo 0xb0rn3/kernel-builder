@@ -98,10 +98,11 @@ log. It matches the ArxOS Control Center design language.
 
 ### Prebuilt binary release (no compiler needed)
 
-The September 13 resource-planner update is available in source on `main`.
-No new binary release was published with that update. Older release binaries
-may not contain `akt resources` or the automatic job limits; build current source
-to use these changes now.
+Resource controls are included in **v0.1.1** for x86-64 Linux, in both the native
+glibc and static musl builds. Earlier binaries do not contain this update.
+Each release includes the standalone binaries, bundles with installer/data,
+and `SHA256SUMS`. Download the checksum file alongside the assets and verify
+the selected files before extraction or installation.
 
 Grab the latest build from **[Releases](https://github.com/0xb0rn3/kernel-builder/releases)**:
 
@@ -115,6 +116,22 @@ The release also ships the bare `akt` binary on its own, enough for `akt detect`
 `explain` / `gui` (the GUI is embedded in the binary). For maximum portability across any Linux
 (any glibc), use the **`-musl`** static build (`akt-x86_64-linux-musl`, or the `*-musl.tar.gz`
 bundle); the plain build is smaller but needs a recent glibc.
+
+To fetch and verify the portable bundle using GitHub CLI:
+
+```sh
+mkdir kernel-builder-v0.1.1-download
+cd kernel-builder-v0.1.1-download
+gh release download v0.1.1 --repo 0xb0rn3/kernel-builder \
+  --pattern kernel-builder-v0.1.1-x86_64-linux-musl.tar.gz --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+tar xzf kernel-builder-v0.1.1-x86_64-linux-musl.tar.gz
+cd kernel-builder
+./akt --version
+sudo ./install.sh
+```
+
+Checksums detect changed downloads; they are not an independent signature.
 
 ### From source (manual compile)
 
@@ -149,6 +166,14 @@ passed in a disposable QEMU/KVM VM. See [test evidence](tests/VALIDATION.md).
 This does not establish end-to-end Arch/Debian build success, boot safety,
 performance gains, or hardware support. Compile on the host; run regression,
 installation and runtime acceptance in a throwaway VM before hardware use.
+
+## Packaging a release
+
+Compile native and `x86_64-unknown-linux-musl` release targets on the build host,
+then run `bash tools/package-release.sh /path/to/new-output-directory`.
+The helper refuses an existing output directory, packages only explicit runtime
+files, and creates checksums. It does not install, upload, or publish anything.
+Validate the exact assets in throwaway with `tests/release-vm.py` before publishing.
 
 ## License
 
