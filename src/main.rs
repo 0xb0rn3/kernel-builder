@@ -64,6 +64,8 @@ pub struct Plan {
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
     pub patch_sets: Vec<String>,
+    pub extra_patches: Vec<String>, // user-supplied patches (files or dirs) from --patch, applied last
+    pub patch_strict: bool,    // true (default): a patch that fails to apply ABORTS; false: skip it
     pub output: String,        // what artifact we produce
 }
 
@@ -75,6 +77,7 @@ impl Plan {
             Distro::Arch => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                extra_patches: vec![], patch_strict: true,
                 base: "CachyOS linux-cachyos (rolling latest)".into(),
                 tunes: vec![
                     format!("CachyOS env knobs: _cpusched={}, _use_llvm_lto={}, BBRv3, 1000Hz, x86-64-v3, THP", fl.sched, fl.lto),
@@ -86,6 +89,7 @@ impl Plan {
             Distro::Debian => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                extra_patches: vec![], patch_strict: true,
                 base: "Debian kernel source (apt source / linux-source)".into(),
                 tunes: vec![
                     "CachyOS tunes ported to a Kconfig fragment: BORE (or EEVDF), BBRv3, 1000Hz, full preempt, MGLRU, THP".into(),
@@ -101,10 +105,17 @@ impl Plan {
             Distro::Unknown => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                extra_patches: vec![], patch_strict: true,
                 base: "unknown host".into(), tunes: vec![], overlays: vec![], patch_sets: vec![],
                 output: "unsupported — akt supports Arch-family and Debian-family hosts".into(),
             },
         }
+    }
+    /// Attach user-supplied patches (from --patch) and the apply mode (strict = fail-fast).
+    pub fn with_patches(mut self, extra: Vec<String>, strict: bool) -> Plan {
+        self.extra_patches = extra;
+        self.patch_strict = strict;
+        self
     }
     pub fn to_json(&self) -> String {
         let arr = |v: &[String]| {
@@ -112,9 +123,9 @@ impl Plan {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"output\":\"{}\"}}",
+            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
             self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")), json_escape(&self.base),
-            arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), json_escape(&self.output))
+            arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), arr(&self.extra_patches), self.patch_strict, json_escape(&self.output))
     }
 }
 
@@ -124,6 +135,18 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
 }
 fn has_flag(args: &[String], name: &str) -> bool { args.iter().any(|a| a == name) }
+/// Collect every value of a repeatable flag, e.g. `--patch a.patch --patch b/`.
+fn flags_multi<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
+    let mut v = vec![];
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name {
+            if let Some(val) = args.get(i + 1) { v.push(val.as_str()); i += 2; continue; }
+        }
+        i += 1;
+    }
+    v
+}
 
 /// Validate + normalize the kernel name (becomes the pkgsuffix + LOCALVERSION + package filenames).
 fn kernel_name(s: &str) -> Result<String, String> {
@@ -145,6 +168,8 @@ fn main() -> ExitCode {
         Err(e) => { eprintln!("akt: {e}"); return ExitCode::FAILURE; }
     };
     let out = flag(&args, "--out").map(|s| s.to_string());
+    let extra_patches: Vec<String> = flags_multi(&args, "--patch").iter().map(|s| s.to_string()).collect();
+    let patch_strict = !has_flag(&args, "--patch-optional");
     let pkgrel = flag(&args, "--pkgrel").unwrap_or("1").to_string();
     if pkgrel.is_empty() || !pkgrel.chars().all(|c| c.is_ascii_digit()) {
         eprintln!("akt: --pkgrel must be a number (the package revision / version, default 1)"); return ExitCode::FAILURE;
@@ -172,7 +197,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "plan" => {
-            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel);
+            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+                .with_patches(extra_patches.clone(), patch_strict);
             if json { println!("{}", p.to_json()); }
             else {
                 println!("== akt tune plan ({}, flavor {}) ==", p.distro.name(), p.flavor.key);
@@ -180,7 +206,30 @@ fn main() -> ExitCode {
                 for t in &p.tunes { println!("  tune     : {t}"); }
                 for o in &p.overlays { println!("  overlay  : {o}"); }
                 for ps in &p.patch_sets { println!("  patches  : {ps}"); }
+                for ep in &p.extra_patches { println!("  +patch   : {ep}"); }
+                println!("  patch mode: {}", if p.patch_strict { "strict (fail-fast)" } else { "optional (skip on miss)" });
                 println!("  output   : {}", p.output);
+            }
+            ExitCode::SUCCESS
+        }
+        "patches" => {
+            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+                .with_patches(extra_patches.clone(), patch_strict);
+            let (files, dirs) = build::collect_patches(&build::bundled_patch_dirs(p.distro), &p.extra_patches);
+            if json {
+                let arr = |v: &[String]| { let i: Vec<String> = v.iter().map(|s| format!("\"{}\"", json_escape(s))).collect(); format!("[{}]", i.join(",")) };
+                println!("{{\"patches\":{},\"strict\":{}}}", arr(&files), p.patch_strict);
+            } else {
+                println!("== patches for {} / flavor {} ==", p.distro.name(), p.flavor.key);
+                if files.is_empty() {
+                    println!("  (none — bundled dirs are empty; add with --patch <file|dir> or drop *.patch into patches/arxos)");
+                }
+                for f in &files { println!("  {f}"); }
+                for d in &dirs {
+                    if std::path::Path::new(&format!("{d}/SHA256SUMS")).exists() { println!("  integrity: {d}/SHA256SUMS present (verified before apply)"); }
+                }
+                println!("  order: bundled first, then --patch (files/dirs) in the order given");
+                println!("  mode : {}", if p.patch_strict { "strict — a patch that fails to apply ABORTS the build" } else { "optional — patches that do not apply are skipped" });
             }
             ExitCode::SUCCESS
         }
@@ -190,7 +239,9 @@ fn main() -> ExitCode {
         }
         "build" => {
             let dry = has_flag(&args, "--dry-run");
-            match build::run(Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel), dry) {
+            let plan = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+                .with_patches(extra_patches.clone(), patch_strict);
+            match build::run(plan, dry) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: build failed: {e}"); ExitCode::FAILURE }
             }
@@ -219,16 +270,27 @@ fn usage() -> String {
   detect                 show the host distro + which build path applies
   resources [--json]      inspect build CPU, RAM and disk limits (AKT_WORK path)
   plan   [--flavor F]    print the tune plan (base, tunes, patches) without building
-  build  [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--dry-run]
+  patches [--patch P]    list every patch that will be applied, in order, for this host
+  build  [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
                          build a tuned kernel for this host
                          --name / --rename  builds linux-<NAME> (default: arxos)
                          --pkgrel N         package revision / custom version (default: 1)
                          --out DIR          write the finished packages to DIR
+                         --patch P          extra patch to apply (a .patch/.diff file OR a
+                                            directory of them); repeatable, applied after the
+                                            bundled patches in the order given
+                         --patch-optional   skip patches that do not apply instead of aborting
+                                            (default is strict: a failed patch aborts the build)
   explain [--flavor F] [--name NAME]
                          explain what each option means for your custom kernel
   gate   <config-file>   verify the ARXOS hardening delta is present in a built .config
   gui    [--port N]      launch the local web GUI (default http://127.0.0.1:8787)
   version
+
+PATCHES: bundled patches live in patches/arxos (all hosts) and patches/kali (Debian). A SHA256SUMS
+file in a patch directory is verified before any patch is applied. Patches are auto-detected at -p1
+or -p0, already-applied patches are skipped, and in strict mode (default) a patch that does not apply
+aborts the build so a kernel is never silently shipped without an expected fix.
 
 FLAVORS: default (BORE+ThinLTO) | rt (PREEMPT_RT) | hardened (KSPP+kCFI)
 Add --json to detect/plan/gate for machine-readable output.")

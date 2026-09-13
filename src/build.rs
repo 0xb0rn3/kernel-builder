@@ -122,9 +122,11 @@ fn build_arch(p: &Plan) -> io::Result<()> {
 
     // 4. overlay ARXOS config + patches, RE-ASSERT + HARD-VERIFY the delta (fail-fast).
     let kdir = find_kdir(basep).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "kernel source dir not found under src/"))?;
-    for patch in list_patches(&dd.join("patches/arxos")) {
-        let _ = step(&format!("patch {}", patch), Path::new(&kdir), &[],
-            &format!("patch -Np1 --forward < {patch} || echo '  (skipped, did not apply)'"));
+    let (pfiles, pdirs) = collect_patches(&bundled_patch_dirs(p.distro), &p.extra_patches);
+    if !pfiles.is_empty() {
+        if !pdirs.is_empty() { step("verify patch integrity", Path::new(&kdir), &[], &integrity_script(&pdirs))?; }
+        step(&format!("apply {} patch(es) [{}]", pfiles.len(), if p.patch_strict { "strict" } else { "optional" }),
+            Path::new(&kdir), &[], &apply_patches_script(&pfiles, p.patch_strict))?;
     }
     step("[4/5] overlay ARXOS config + verify hardening delta", Path::new(&kdir), &env,
         &format!(
@@ -163,8 +165,6 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
     let frag = dd.join("config/arxos.fragment");
-    let kali = dd.join("patches/kali");
-    let arxp = dd.join("patches/arxos");
     resources::detect(workp)?.report();
 
     // 1. Debian kernel source. `linux-source` (from the distro) is the reproducible route; the git
@@ -187,9 +187,11 @@ fn build_debian(p: &Plan) -> io::Result<()> {
            --enable TRANSPARENT_HUGEPAGE --enable LRU_GEN --enable LRU_GEN_ENABLED; true")?;
 
     // 3. overlay the ARXOS hardening delta + Kali/ARXOS patches, then verify.
-    for patch in list_patches(&arxp).into_iter().chain(list_patches(&kali)) {
-        let _ = step(&format!("patch {}", patch), srcp, &[],
-            &format!("patch -Np1 --forward < {patch} || echo '  (skipped, did not apply)'"));
+    let (pfiles, pdirs) = collect_patches(&bundled_patch_dirs(p.distro), &p.extra_patches);
+    if !pfiles.is_empty() {
+        if !pdirs.is_empty() { step("verify patch integrity", srcp, &[], &integrity_script(&pdirs))?; }
+        step(&format!("apply {} patch(es) [{}]", pfiles.len(), if p.patch_strict { "strict" } else { "optional" }),
+            srcp, &[], &apply_patches_script(&pfiles, p.patch_strict))?;
     }
     step("[4/6] overlay ARXOS config + verify hardening delta", srcp, &[],
         &format!(
@@ -245,9 +247,89 @@ fn list_patches(dir: &Path) -> Vec<String> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().map(|x| x == "patch").unwrap_or(false) { v.push(p.display().to_string()); }
+            if p.extension().map(|x| x == "patch" || x == "diff").unwrap_or(false) { v.push(p.display().to_string()); }
         }
     }
     v.sort();
     v
+}
+
+/// The patch directories bundled beside the binary for a given host. arxos applies everywhere; kali
+/// (wireless injection etc.) applies on the Debian path only, matching the documented build.
+pub fn bundled_patch_dirs(distro: Distro) -> Vec<std::path::PathBuf> {
+    let dd = data_dir();
+    match distro {
+        Distro::Debian => vec![dd.join("patches/arxos"), dd.join("patches/kali")],
+        _ => vec![dd.join("patches/arxos")],
+    }
+}
+
+/// Expand patch sources (bundled dirs first, then user --patch args) into an ordered file list plus
+/// the set of directories that carry patches (used to run their SHA256SUMS integrity check). A
+/// --patch value may be a directory (its *.patch/*.diff, sorted) or a single explicit file.
+pub fn collect_patches(bundled: &[std::path::PathBuf], extra: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut files = vec![];
+    let mut dirs = vec![];
+    for d in bundled {
+        let fs = list_patches(d);
+        if !fs.is_empty() { dirs.push(d.display().to_string()); files.extend(fs); }
+    }
+    for e in extra {
+        let p = Path::new(e);
+        if p.is_dir() {
+            let fs = list_patches(p);
+            if !fs.is_empty() { dirs.push(e.clone()); files.extend(fs); }
+        } else {
+            // an explicit file (or a nonexistent path we surface as an error at apply time)
+            files.push(e.clone());
+        }
+    }
+    (files, dirs)
+}
+
+/// Single-quote a string for safe embedding in a bash script.
+fn shq(s: &str) -> String { format!("'{}'", s.replace('\'', "'\\''")) }
+
+/// If a patch directory ships a SHA256SUMS manifest, verify it before any patch is applied. An
+/// integrity failure always aborts, regardless of strict/optional (supply-chain, non-negotiable).
+fn integrity_script(dirs: &[String]) -> String {
+    let mut s = String::from("set -u\n");
+    for d in dirs {
+        s.push_str(&format!(
+            "if [ -f {d}/SHA256SUMS ]; then echo \"  verifying integrity: {d}/SHA256SUMS\"; \
+             ( cd {d} && sha256sum -c --strict SHA256SUMS ) || {{ echo '  PATCH INTEGRITY CHECK FAILED' >&2; exit 5; }}; fi\n",
+            d = shq(d)));
+    }
+    s
+}
+
+/// Apply each patch with -p auto-detect (p1 then p0), skipping already-applied patches. In strict
+/// mode a patch that does not apply aborts (exit 3); in optional mode it is warned and skipped.
+fn apply_patches_script(files: &[String], strict: bool) -> String {
+    let mut s = String::from(r#"set -u
+_apply_one() {
+  f="$1"
+  if [ ! -f "$f" ]; then echo "  MISSING PATCH FILE: $f" >&2; return 3; fi
+  for lvl in 1 0; do
+    if patch -R -p$lvl --dry-run --force < "$f" >/dev/null 2>&1; then
+      echo "  already applied (p$lvl), skipping: $(basename "$f")"; return 0; fi
+  done
+  for lvl in 1 0; do
+    if patch -p$lvl --forward --dry-run < "$f" >/dev/null 2>&1; then
+      patch -p$lvl --forward < "$f" >/dev/null && { echo "  applied (p$lvl): $(basename "$f")"; return 0; }
+    fi
+  done
+  echo "  DID NOT APPLY: $(basename "$f")" >&2; return 3
+}
+"#);
+    for f in files {
+        let onfail = if strict {
+            "echo \"  strict mode: aborting (patch did not apply)\" >&2; exit $rc;"
+        } else {
+            "echo \"  (optional: skipped)\" >&2;"
+        };
+        s.push_str(&format!("_apply_one {q} || {{ rc=$?; {onfail} }}\n", q = shq(f)));
+    }
+    s.push_str("exit 0\n");
+    s
 }

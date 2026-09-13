@@ -43,7 +43,9 @@ akt detect                 # host distro + which build path applies
 akt resources --json       # CPU/RAM/disk plan, using AKT_WORK or current directory
 akt explain                # what each option means for your custom kernel
 akt plan                   # print the tune plan (base, tunes, patches), no build
+akt patches                # list every patch that will be applied, in order
 akt build                  # build a tuned kernel for this host
+akt build --patch p.patch  # also apply your own patch (file or dir); repeatable, fail-fast
 akt build --name mykernel  # rename the kernel: builds linux-mykernel (default: linux-arxos)
 akt build --flavor rt      # real-time flavor (PREEMPT_RT + BORE)
 akt build --dry-run        # show the plan and check resources without building
@@ -147,15 +149,36 @@ Compiling needs `rust`/`cargo`. Building a kernel then needs the host's toolchai
 
 ## Adding patches
 
-- `patches/arxos/*.patch`: optional local source patches for both build paths.
-- `patches/kali/*.patch`: optional local source patches for the Debian path only.
-- `config/arxos.fragment`: the bundled hardening configuration overlay.
+Two ways to feed patches into a build:
 
-The two patch directories currently contain README files only. No additional
-wireless, scheduler, or distribution emergency-backport series is bundled there.
-The build engine applies supplied patches before its final configuration overlay.
+- **Bundled** — drop `*.patch` / `*.diff` files into a patch directory beside the builder:
+  - `patches/arxos/` — applied on every host (after the config overlay).
+  - `patches/kali/` — applied on the Debian path only (wireless injection, extra HID, ...).
+  Both directories currently ship a README only; no wireless, scheduler, or emergency-backport
+  series is bundled by default.
+- **Your own, at build time** — `--patch <path>` (repeatable). The path can be a single
+  `.patch`/`.diff` file or a directory of them. Your patches apply *after* the bundled ones,
+  in the order given:
 
-Patches are applied `--forward` and skipped (never fatal) if they don't apply on the current base.
+```sh
+akt build --patch fixes/CVE-2026-1234.patch      # one file
+akt build --patch ~/my-kernel-patches/           # a whole directory (sorted)
+akt build --patch a.patch --patch b/ --patch c.diff
+akt patches --patch ~/my-kernel-patches/         # list what WOULD be applied, in order
+```
+
+- `config/arxos.fragment` — the Kconfig overlay (the hardening delta). Edit here to change the tune.
+  Patches apply before this final configuration overlay.
+
+**How patches are applied**
+
+- Auto-detected at `-p1` then `-p0`; a patch already present in the tree is detected and skipped.
+- **Strict by default**: a patch that does not apply **aborts the build** — so a kernel is never
+  silently shipped without a fix you expected. Pass `--patch-optional` to skip non-applying
+  patches instead (the old lenient behavior).
+- **Integrity**: if a patch directory contains a `SHA256SUMS` file, it is verified with
+  `sha256sum -c --strict` before any patch is applied; a mismatch aborts regardless of mode.
+- Run `akt patches` (add `--json` for machine output) to see the exact ordered list first.
 
 ## Status
 
