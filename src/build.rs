@@ -178,16 +178,31 @@ fn pkg_identity(pkg: &Path) -> Option<(String, String)> {
     match (name, ver) { (Some(n), Some(v)) => Some((n, v)), _ => None }
 }
 
-/// Compare two pkgvers using pacman's own `vercmp` (authoritative); fall back to a byte compare only
-/// if vercmp is unavailable. Returns Ordering of a vs b.
-fn vercmp(a: &str, b: &str) -> std::cmp::Ordering {
-    if let Ok(out) = Command::new("vercmp").arg(a).arg(b).output() {
-        if out.status.success() {
-            let n: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
-            return n.cmp(&0);
-        }
+/// Compare two pkgvers using pacman's own `vercmp` (the only correct kernel-version ordering, e.g.
+/// 7.9 < 7.10 where a byte compare would disagree). FAIL-CLOSED: if vercmp is missing, exits non-zero,
+/// or prints anything but -1/0/1, return an error rather than guessing — a wrong comparison here could
+/// install the wrong kernel. Never falls back to a byte compare.
+fn vercmp(a: &str, b: &str) -> io::Result<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let out = Command::new("vercmp").arg(a).arg(b).output()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("vercmp unavailable (pacman not installed?): {e}")))?;
+    if !out.status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, format!("vercmp {a} {b} exited non-zero")));
     }
-    a.cmp(b)
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "-1" => Ok(Ordering::Less),
+        "0"  => Ok(Ordering::Equal),
+        "1"  => Ok(Ordering::Greater),
+        other => Err(io::Error::new(io::ErrorKind::Other,
+            format!("vercmp gave unparseable output {other:?} for {a} vs {b}"))),
+    }
+}
+
+/// The installed pkgver of a package (via `pacman -Q <pkg>`), or None if it is not installed.
+fn installed_pkgver(pkg: &str) -> Option<String> {
+    let out = Command::new("pacman").arg("-Q").arg(pkg).output().ok()?;
+    if !out.status.success() { return None; }
+    String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1).map(|v| v.to_string())
 }
 
 /// Roll back to the previously-built kernel: reinstall the retained linux-<kname> package archived in
@@ -229,19 +244,37 @@ pub fn rollback(p: &Plan) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::NotFound,
             format!("no archived {} package in {} (nothing to roll back to)", kpkg, prev.display())));
     }
-    kernels.sort_by(|a, b| vercmp(&a.0, &b.0));
-    let (kver, kpath) = kernels.last().unwrap().clone();
-    let hmatch = headers.iter().find(|(hv, _)| *hv == kver).map(|(_, hp)| hp.clone());
+    // Pick the highest-version archived kernel, failing closed if any pair can't be compared.
+    let mut best = kernels[0].clone();
+    for cand in &kernels[1..] {
+        if vercmp(&cand.0, &best.0)? == std::cmp::Ordering::Greater { best = cand.clone(); }
+    }
+    let (kver, kpath) = best;
 
-    println!("rolling back to {} {}", kpkg, kver);
+    // Refuse a non-downgrade: rollback must go to a version OLDER than what is installed, so the
+    // highest prev/ entry can never silently UPGRADE the running kernel. (If the package is not
+    // installed at all, there is nothing to be older than — install the archived one as-is.)
+    if let Some(iv) = installed_pkgver(&kpkg) {
+        match vercmp(&kver, &iv)? {
+            std::cmp::Ordering::Less => {}
+            _ => return Err(io::Error::new(io::ErrorKind::Other, format!(
+                "archived {kpkg} {kver} is not older than the installed {iv}; refusing to roll back \
+                 to a same-or-newer version (build + install it explicitly if that is what you want)"))),
+        }
+        println!("rolling back {} {} -> {} (downgrade)", kpkg, iv, kver);
+    } else {
+        println!("installing archived {} {} ({} is not currently installed)", kpkg, kver, kpkg);
+    }
+    let hmatch = headers.iter().find(|(hv, _)| *hv == kver).map(|(_, hp)| hp.clone());
     println!("  kernel : {}", kpath.display());
+    // argv-based, no shell; `--` ends option parsing so a path starting with '-' is never a flag.
     let mut args: Vec<std::ffi::OsString> =
-        vec!["pacman".into(), "-U".into(), "--noconfirm".into(), kpath.clone().into()];
+        vec!["pacman".into(), "-U".into(), "--noconfirm".into(), "--".into(), kpath.clone().into()];
     match &hmatch {
         Some(hp) => { println!("  headers: {}", hp.display()); args.push(hp.clone().into()); }
         None => println!("  headers: none matching version {} (installing kernel only)", kver),
     }
-    let status = Command::new("sudo").args(&args).status()?;   // argv-based, no shell interpolation
+    let status = Command::new("sudo").args(&args).status()?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "pacman -U failed"));
     }
@@ -422,4 +455,39 @@ _apply_one() {
     }
     s.push_str("exit 0\n");
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    // vercmp must use real version ordering, not byte ordering (the classic 7.9 vs 7.10 trap).
+    #[test]
+    fn vercmp_uses_version_not_byte_order() {
+        assert_eq!(vercmp("7.9", "7.10").unwrap(), Ordering::Less);   // byte compare would say Greater
+        assert_eq!(vercmp("7.10", "7.9").unwrap(), Ordering::Greater);
+    }
+
+    #[test]
+    fn vercmp_orders_pkgrel_and_base() {
+        assert_eq!(vercmp("7.2.0-2", "7.2.0-1").unwrap(), Ordering::Greater);
+        assert_eq!(vercmp("7.2.5-1", "7.2.0-2").unwrap(), Ordering::Greater);
+        assert_eq!(vercmp("7.2.5-1", "7.2.5-1").unwrap(), Ordering::Equal);
+    }
+
+    // A rollback target must be OLDER than what is "installed" (modeled here with two versions):
+    // the guard is `vercmp(target, installed) == Less`.
+    #[test]
+    fn downgrade_guard_semantics() {
+        // installed 7.2.5-1, archived 7.2.0-2 -> older -> allowed
+        assert_eq!(vercmp("7.2.0-2", "7.2.5-1").unwrap(), Ordering::Less);
+        // archived 7.2.5-1 vs installed 7.2.0-2 -> newer -> the guard would refuse
+        assert_ne!(vercmp("7.2.5-1", "7.2.0-2").unwrap(), Ordering::Less);
+    }
+
+    #[test]
+    fn installed_pkgver_absent_is_none() {
+        assert!(installed_pkgver("definitely-not-a-real-package-xyzzy").is_none());
+    }
 }
