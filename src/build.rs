@@ -69,12 +69,17 @@ fn step(label: &str, dir: &Path, env: &[(&str, &str)], script: &str) -> io::Resu
 }
 
 /// A cross-process advisory build lock (flock) held for the lifetime of the returned guard, and
-/// released automatically when the process exits or the guard drops — even on crash. Shared by the
+/// released automatically when the process exits or the guard drops, even on crash. Shared by the
 /// CLI and the GUI (both go through build_arch/build_debian), so two builds can never mutate the same
 /// work dir at once (makepkg -C / rm -rf would otherwise corrupt an in-flight tree). A per-process
 /// Option<Child> could not cover a second process; this can.
+///
+/// The lock fd's close-on-exec flag is CLEARED so the build subprocesses this worker spawns (makepkg)
+/// inherit the same open file description. The flock is tied to that description, so it stays held as
+/// long as ANY holder keeps the fd open. If the worker is killed mid-build while makepkg survives, the
+/// lock therefore stays held by makepkg and a second build cannot start until the real mutation ends.
 struct BuildLock(#[allow(dead_code)] std::fs::File);
-extern "C" { fn flock(fd: i32, op: i32) -> i32; }
+extern "C" { fn flock(fd: i32, op: i32) -> i32; fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32; }
 fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
     use std::os::unix::io::AsRawFd;
     let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
@@ -85,6 +90,10 @@ fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
         return Err(io::Error::new(io::ErrorKind::WouldBlock,
             format!("another akt build is already running in {} (build lock held)", work.display())));
     }
+    // Clear FD_CLOEXEC so spawned build subprocesses inherit this fd and keep the flock held if the
+    // worker dies before they do (F_SETFD=2, flags=0). Best-effort: the lock is still correct without it.
+    const F_SETFD: i32 = 2;
+    unsafe { fcntl(f.as_raw_fd(), F_SETFD, 0); }
     Ok(BuildLock(f))
 }
 
@@ -540,5 +549,27 @@ mod tests {
         drop(held);
         assert!(acquire_build_lock(&dir).is_ok(), "lock frees after the guard drops");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Finding 3: a build subprocess that outlives the worker keeps the lock held. We acquire the lock,
+    // spawn a `sleep` that inherits the CLOEXEC-cleared lock fd, drop our own guard, and assert the lock
+    // is still held (blocked) until the surviving child exits, then frees.
+    #[test]
+    fn build_lock_survives_via_inherited_child_fd() {
+        let dir = std::env::temp_dir().join(format!("akt-lock-child-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = acquire_build_lock(&dir).expect("first lock");
+        let mut child = std::process::Command::new("sleep").arg("30")
+            .stdin(std::process::Stdio::null())
+            .spawn().expect("spawn holder");
+        std::thread::sleep(std::time::Duration::from_millis(250)); // let it exec (inheriting the fd)
+        drop(held);                                                // our own fd is gone now
+        let blocked = acquire_build_lock(&dir).is_err();
+        let _ = child.kill(); let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(250)); // let the OFD close
+        let free_after = acquire_build_lock(&dir).is_ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(blocked, "lock must stay held by the surviving child after the parent guard drops");
+        assert!(free_after, "lock must free once the surviving child exits");
     }
 }
