@@ -1,4 +1,41 @@
-# Resource planner validation, 2026-09-13
+# Kernel builder validation
+
+## Lock error handling and HTTP checks, 2026-09-14
+
+Host compilation only: `cargo test --no-run --locked --offline`,
+`cargo build --release --locked --offline`, and the C fault-injection fixture
+compiled with `-O2 -Wall -Wextra -Werror`. No host runtime tests were run.
+
+Execution: disposable QEMU/KVM live guest, UUID
+`2193f46f-cd6a-41bb-b29e-9a57d425b36d`, kernel `7.2.5-1-arxos`.
+The guest used airootfs; the attached work disk stayed unmounted.
+Host and guest artifact hashes matched:
+
+- Patched release binary: `a25f85868c7b85bb0b6b4ce32a521283201162c8bf02cf2fbb1432491c83b4fc`
+- Rust test binary: `67006c88448f5d742b05367f62156b573af54db3b9765b74f65c8b0996751fa9`
+- Fault fixture: `424c6186deb269228178db3dac1110f8f158ee6a6ea4b045a7bd25c50841bc68`
+- Baseline 61a9678 binary: `5ed6fdad672614250c8b7acbae29a06760305734dfa191f98dc638da9b13463f`
+
+Results:
+
+- Rust unit binary: 16 passed, 0 failed, 2.66 seconds, exit 0.
+- [hardening-vm.py](hardening-vm.py): 6 passed, 40.519 seconds, exit 0.
+- The injected F_SETFD failure test fails on the unchanged 61a9678 baseline:
+  it ignores EPERM and reaches resource validation. With the patch, the
+  command returns EPERM before recipe preparation and releases the lock.
+  Invalid resource settings prevent the baseline from reaching a real recipe.
+
+No package installation, kernel build or destructive toolkit action ran.
+The HTTP tests cover initial-line/header deadlines, duplicate security
+headers, rejected build requests, normal page delivery, bounded log reads,
+and symlink/FIFO/writable-parent refusals. See [procedure](hardening-vm.md).
+
+Not established: a full real bash/makepkg/compiler descendant lifecycle after
+worker death, entropy-source failure at GUI startup, real recipe integrity,
+kernel compilation/boot, performance, or release-asset acceptance. The v0.3.0
+published binaries are unchanged and do not include this follow-up patch.
+
+## Resource planner validation, 2026-09-13
 
 ## Binary release v0.1.1
 

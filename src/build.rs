@@ -80,6 +80,22 @@ fn step(label: &str, dir: &Path, env: &[(&str, &str)], script: &str) -> io::Resu
 /// lock therefore stays held by makepkg and a second build cannot start until the real mutation ends.
 struct BuildLock(#[allow(dead_code)] std::fs::File);
 extern "C" { fn flock(fd: i32, op: i32) -> i32; fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32; }
+
+/// Preserve other descriptor flags and fail closed if inheritance cannot be enabled.
+fn inherit_build_lock(fd: std::os::unix::io::RawFd) -> io::Result<()> {
+    const F_GETFD: i32 = 1;
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i32 = 1;
+    let flags = unsafe { fcntl(fd, F_GETFD, 0) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { fcntl(fd, F_SETFD, flags & !FD_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
     use std::os::unix::io::AsRawFd;
     let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
@@ -90,10 +106,9 @@ fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
         return Err(io::Error::new(io::ErrorKind::WouldBlock,
             format!("another akt build is already running in {} (build lock held)", work.display())));
     }
-    // Clear FD_CLOEXEC so spawned build subprocesses inherit this fd and keep the flock held if the
-    // worker dies before they do (F_SETFD=2, flags=0). Best-effort: the lock is still correct without it.
-    const F_SETFD: i32 = 2;
-    unsafe { fcntl(f.as_raw_fd(), F_SETFD, 0); }
+    // Do not start a build unless children can retain the lock after worker death.
+    // On failure, returning drops f and releases the lock before any recipe mutation.
+    inherit_build_lock(f.as_raw_fd())?;
     Ok(BuildLock(f))
 }
 
@@ -538,6 +553,24 @@ mod tests {
     #[test]
     fn installed_pkgver_absent_is_none() {
         assert!(installed_pkgver("definitely-not-a-real-package-xyzzy").is_none());
+    }
+
+    #[test]
+    fn build_lock_inheritance_rejects_invalid_fd() {
+        // A real failing syscall, with no invalid File ownership or descriptor-close race.
+        assert_eq!(inherit_build_lock(-1).unwrap_err().raw_os_error(), Some(9)); // EBADF
+    }
+
+    #[test]
+    fn build_lock_inheritance_clears_only_cloexec() {
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::File::open("/dev/null").unwrap();
+        let fd = f.as_raw_fd();
+        let before = unsafe { fcntl(fd, 1, 0) }; // F_GETFD
+        assert!(before >= 0);
+        assert_ne!(before & 1, 0, "Rust File starts close-on-exec");
+        inherit_build_lock(fd).unwrap();
+        assert_eq!(unsafe { fcntl(fd, 1, 0) }, before & !1);
     }
 
     #[test]

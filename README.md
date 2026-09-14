@@ -107,6 +107,10 @@ AKT_WORK=/path/to/kernel-work AKT_MAX_JOBS=2 akt build
 The work filesystem must exist or have an existing parent with enough free space.
 Automatic resource detection currently requires Linux cgroup v2.
 
+Builds share a work-directory lock. Current source refuses to proceed if the
+lock cannot be made inheritable by build children. This follow-up is newer than
+the v0.3.0 binaries; it does not change those published assets.
+
 This resource update does not certify the existing rolling recipe, patch-skip
 policy, package output cleanup, Debian kernel build, or resulting kernel runtime.
 
@@ -142,12 +146,12 @@ bundle); the plain build is smaller but needs a recent glibc.
 To fetch and verify the portable bundle using GitHub CLI:
 
 ```sh
-mkdir kernel-builder-v0.1.1-download
-cd kernel-builder-v0.1.1-download
-gh release download v0.1.1 --repo 0xb0rn3/kernel-builder \
-  --pattern kernel-builder-v0.1.1-x86_64-linux-musl.tar.gz --pattern SHA256SUMS
+mkdir kernel-builder-v0.3.0-download
+cd kernel-builder-v0.3.0-download
+gh release download v0.3.0 --repo 0xb0rn3/kernel-builder \
+  --pattern kernel-builder-v0.3.0-x86_64-linux-musl.tar.gz --pattern SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
-tar xzf kernel-builder-v0.1.1-x86_64-linux-musl.tar.gz
+tar xzf kernel-builder-v0.3.0-x86_64-linux-musl.tar.gz
 cd kernel-builder
 ./akt --version
 sudo ./install.sh
@@ -205,6 +209,10 @@ akt patches --patch ~/my-kernel-patches/         # list what WOULD be applied, i
 Development tool. Resource management was added in source commit `91dffc6`.
 Host compilation succeeded; eight Rust unit tests and six integration checks
 passed in a disposable QEMU/KVM VM. See [test evidence](tests/VALIDATION.md).
+
+For lock-error and local HTTP regression checks, see
+[the non-destructive VM procedure](tests/hardening-vm.md). Compile test binaries
+on the host, then execute them only inside the identified disposable VM.
 
 This does not establish end-to-end Arch/Debian build success, boot safety,
 performance gains, or hardware support. Compile on the host; run regression,
