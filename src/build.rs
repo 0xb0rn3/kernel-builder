@@ -23,7 +23,7 @@ if [ -n "${NEWPKG:-}" ]; then
     esac
   done
   shopt -u nullglob
-  [ "$moved" -gt 0 ] && echo "  archived $moved superseded artifact(s) -> prev/ (rollback; prune freely)"
+  [ "$moved" -gt 0 ] && echo "  archived $moved superseded artifact(s) -> prev/ (roll back with: akt rollback)"
   echo "  current linux-$KNAME $CURVER:"; ls -1 linux-$KNAME*"$CURVER"*.pkg.tar.* 2>/dev/null | sed 's/^/    /'
 else
   echo "  (no package produced — check log)"
@@ -156,7 +156,39 @@ fn build_arch(p: &Plan) -> io::Result<()> {
             "mkdir -p \"$OUT\" && mv -f linux-$KNAME*.pkg.tar.* \"$OUT\"/ 2>/dev/null && echo \"  moved to $OUT\" || echo \"  (nothing to move)\"")?;
     }
     println!("Install with:  sudo pacman -U <pkg>   (verify + boot-test in a throwaway VM first)");
+    println!("Rollback:      `akt rollback --name {}` reinstalls the previous package from prev/.", p.kname);
+    println!("               (A same-name `pacman -U` upgrade REMOVES the old version's /usr/lib/modules,");
+    println!("               so keeping only the old vmlinuz+initramfs is NOT enough to roll back — the");
+    println!("               retained prev/ package is. For a permanent second kernel, build with --name.)");
     Ok(())
+}
+
+/// Roll back to the previously-built kernel: reinstall the newest linux-<kname> package archived in
+/// prev/. This is the mechanism the ArxOS kernel gate proved is REQUIRED — a same-name pacman upgrade
+/// deletes the prior version's /usr/lib/modules, so a saved kernel image alone cannot boot cleanly;
+/// reinstalling the retained package restores the module tree + rebuilds the initramfs via pacman hooks.
+pub fn rollback(p: &Plan) -> io::Result<()> {
+    if p.distro != Distro::Arch {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "akt rollback currently supports the Arch path only"));
+    }
+    let dd = data_dir();
+    let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/arch-{}", dd.display(), p.flavor.key));
+    let prev = format!("{work}/cos/linux-cachyos/prev");
+    // Use `find` (empty on no-match), never `ls` on a glob: an unmatched glob makes `ls` list the
+    // cwd instead. Filter to the wanted class BEFORE picking the newest by mtime, so the kernel
+    // package and its headers never shadow each other.
+    let script = format!(
+        "set -e; \
+         newest() {{ find {prev} -maxdepth 1 -type f -name 'linux-{k}-*.pkg.tar.*' -printf '%T@ %p\\n' 2>/dev/null \
+                    | grep -vE 'debug' | grep -E \"$1\" | sort -rn | head -1 | cut -d' ' -f2-; }}; \
+         PKG=$(newest '/linux-{k}-[0-9]'); \
+         HDR=$(newest '/linux-{k}-headers-'); \
+         if [ -z \"$PKG\" ]; then echo 'no archived previous package in {prev} (nothing to roll back to)'; exit 1; fi; \
+         echo \"rolling back to: $(basename \"$PKG\")${{HDR:+ + $(basename \"$HDR\")}}\"; \
+         sudo pacman -U --noconfirm \"$PKG\" ${{HDR:+\"$HDR\"}}; \
+         echo 'installed. Reboot and select this kernel; boot-test in a throwaway first.'",
+        prev = prev, k = p.kname);
+    step(&format!("rollback linux-{} from prev/", p.kname), Path::new(&dd), &[], &script)
 }
 
 fn build_debian(p: &Plan) -> io::Result<()> {

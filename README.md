@@ -49,9 +49,29 @@ akt build --patch p.patch  # also apply your own patch (file or dir); repeatable
 akt build --name mykernel  # rename the kernel: builds linux-mykernel (default: linux-arxos)
 akt build --flavor rt      # real-time flavor (PREEMPT_RT + BORE)
 akt build --dry-run        # show the plan and check resources without building
+akt rollback               # reinstall the previous kernel package from prev/ (see Rollback below)
 akt gate path/to/.config   # verify the hardening delta is present
 akt gui                    # local web GUI at http://127.0.0.1:8787
 ```
+
+## Rollback
+
+Each build archives the version it supersedes into `prev/` next to the new package. To go back to it:
+
+```sh
+akt rollback                 # reinstall the newest linux-arxos package from prev/
+akt rollback --name mykernel # roll back a custom-named kernel
+```
+
+Why a saved kernel image is not enough on its own: a same-name kernel upgrade (`pacman -U` of
+`linux-arxos` over an older `linux-arxos`) **removes the previous version's `/usr/lib/modules/<rel>`
+tree**, because those files are owned by the package. If you keep only the old `vmlinuz` + initramfs
+and select it in GRUB, it boots but cannot load its modules (e.g. `modprobe vfat` fails, `/boot/efi`
+won't mount) and drops to emergency. The reliable rollback is to **reinstall the retained previous
+package** (which restores the module tree and rebuilds the initramfs via pacman hooks) — that is what
+`akt rollback` does. For a kernel you want to keep permanently alongside another, build it under a
+distinct `--name` so the two packages (and module trees) coexist. Boot-test any rollback in a
+throwaway VM first.
 
 Flavors: `default` (BORE + ThinLTO), `rt` (PREEMPT_RT), `hardened` (KSPP + kCFI). Name your kernel
 with `--name NAME` (builds `linux-NAME`; default `arxos`), so it is yours, not branded. `akt explain`

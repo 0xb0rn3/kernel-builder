@@ -246,6 +246,13 @@ fn main() -> ExitCode {
                 Err(e) => { eprintln!("akt: build failed: {e}"); ExitCode::FAILURE }
             }
         }
+        "rollback" => {
+            let plan = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel);
+            match build::rollback(&plan) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => { eprintln!("akt: rollback failed: {e}"); ExitCode::FAILURE }
+            }
+        }
         "gate" => {
             let cfg = args.get(1).filter(|a| !a.starts_with("--"));
             match cfg {
@@ -283,6 +290,9 @@ fn usage() -> String {
                                             (default is strict: a failed patch aborts the build)
   explain [--flavor F] [--name NAME]
                          explain what each option means for your custom kernel
+  rollback [--name NAME] reinstall the previous linux-<NAME> package from prev/ (kernel rollback).
+                         A same-name upgrade removes the old version's modules, so the retained
+                         prev/ package is the reliable rollback; boot-test in a throwaway first.
   gate   <config-file>   verify the ARXOS hardening delta is present in a built .config
   gui    [--port N]      launch the local web GUI (default http://127.0.0.1:8787)
   version
