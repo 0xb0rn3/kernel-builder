@@ -117,8 +117,10 @@ fn build_arch(p: &Plan) -> io::Result<()> {
         "sed -i \"s/_pkgsuffix=cachyos/_pkgsuffix=$KNAME/g; s/KBUILD_BUILD_HOST=cachyos/KBUILD_BUILD_HOST=$KNAME/\" PKGBUILD; \
          sed -i \"s/^pkgrel=.*/pkgrel=${ARXOS_PKGREL:-1}/\" PKGBUILD")?;
 
-    // 3. extract + prepare.
-    step("[3/5] extract + prepare", basep, &env, "rm -rf src pkg; makepkg -o --skipinteg --nodeps --noconfirm")?;
+    // 3. extract + prepare. NO --skipinteg: makepkg verifies the recipe's source checksums against
+    //    what it downloaded (fail-closed on a tampered/mismatched source), matching the private
+    //    linux-arxos builder. `-C` cleans the previous src/pkg for this recipe only.
+    step("[3/5] extract + prepare", basep, &env, "makepkg -o -C --nodeps --noconfirm")?;
 
     // 4. overlay ARXOS config + patches, RE-ASSERT + HARD-VERIFY the delta (fail-fast).
     let kdir = find_kdir(basep).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "kernel source dir not found under src/"))?;
@@ -128,14 +130,17 @@ fn build_arch(p: &Plan) -> io::Result<()> {
         step(&format!("apply {} patch(es) [{}]", pfiles.len(), if p.patch_strict { "strict" } else { "optional" }),
             Path::new(&kdir), &[], &apply_patches_script(&pfiles, p.patch_strict))?;
     }
-    step("[4/5] overlay ARXOS config + verify hardening delta", Path::new(&kdir), &env,
-        &format!(
-        "./scripts/kconfig/merge_config.sh -m .config {frag}; ./scripts/config -d RUST; make LLVM=1 olddefconfig; \
+    // Pass the fragment path via a quoted env var (never interpolated into the shell) so a data_dir
+    // with spaces/metacharacters is safe.
+    let frag_str = frag.display().to_string();
+    let mut env4 = env.to_vec();
+    env4.push(("ARXOS_FRAG", frag_str.as_str()));
+    step("[4/5] overlay ARXOS config + verify hardening delta", Path::new(&kdir), &env4,
+        "./scripts/kconfig/merge_config.sh -m .config \"$ARXOS_FRAG\"; ./scripts/config -d RUST; make LLVM=1 olddefconfig; \
          ./scripts/config --enable INIT_ON_FREE_DEFAULT_ON --enable INIT_ON_ALLOC_DEFAULT_ON --disable HIBERNATION \
            --enable INTEL_IOMMU_DEFAULT_ON --enable IOMMU_DEFAULT_DMA_STRICT --enable SECURITY_LOCKDOWN_LSM_EARLY \
            --enable INTEGRITY --enable IMA --enable IMA_DEFAULT_HASH_SHA256 --enable SECURITY_DMESG_RESTRICT \
-           --enable LIVEPATCH; make LLVM=1 olddefconfig",
-        frag = frag.display()))?;
+           --enable LIVEPATCH; make LLVM=1 olddefconfig")?;
     if !gate::verify(&format!("{kdir}/.config"), false) {
         return Err(io::Error::new(io::ErrorKind::Other, "ARXOS hardening delta missing after config — aborting before compile"));
     }
@@ -147,7 +152,7 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     let jobs = current.jobs.to_string();
     let mut compile_env = env.to_vec();
     compile_env.push(("ARXOS_BUILD_JOBS", jobs.as_str()));
-    step("[5/5] compile (ThinLTO — long)", basep, &compile_env, "makepkg -e -f --skipinteg --nodeps --noconfirm")?;
+    step("[5/5] compile (ThinLTO — long)", basep, &compile_env, "makepkg -e -f --nodeps --noconfirm")?;
     // tidy the output dir: keep only what we just built, archive superseded versions into prev/.
     println!("\nDone.");
     let _ = step("tidy output dir", basep, &[("KNAME", p.kname.as_str())], TIDY_ARCH);
@@ -316,14 +321,13 @@ fn build_debian(p: &Plan) -> io::Result<()> {
         step(&format!("apply {} patch(es) [{}]", pfiles.len(), if p.patch_strict { "strict" } else { "optional" }),
             srcp, &[], &apply_patches_script(&pfiles, p.patch_strict))?;
     }
-    step("[4/6] overlay ARXOS config + verify hardening delta", srcp, &[],
-        &format!(
-        "./scripts/kconfig/merge_config.sh -m .config {frag}; make olddefconfig; \
+    let frag_str = frag.display().to_string();   // quoted env var, not shell-interpolated (path-safe)
+    step("[4/6] overlay ARXOS config + verify hardening delta", srcp, &[("ARXOS_FRAG", frag_str.as_str())],
+        "./scripts/kconfig/merge_config.sh -m .config \"$ARXOS_FRAG\"; make olddefconfig; \
          ./scripts/config --enable INIT_ON_FREE_DEFAULT_ON --enable INIT_ON_ALLOC_DEFAULT_ON --disable HIBERNATION \
            --enable INTEL_IOMMU_DEFAULT_ON --enable IOMMU_DEFAULT_DMA_STRICT --enable SECURITY_LOCKDOWN_LSM_EARLY \
            --enable INTEGRITY --enable IMA --enable IMA_DEFAULT_HASH_SHA256 --enable SECURITY_DMESG_RESTRICT \
-           --enable LIVEPATCH; make olddefconfig",
-        frag = frag.display()))?;
+           --enable LIVEPATCH; make olddefconfig")?;
     if !gate::verify(&format!("{src}/.config"), false) {
         return Err(io::Error::new(io::ErrorKind::Other, "ARXOS hardening delta missing after config — aborting before compile"));
     }
@@ -345,12 +349,26 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     Ok(())
 }
 
+/// Find the extracted kernel source dir under <base>/src (the dir containing a `.config`). Walked in
+/// Rust (no shell), so a base path with spaces or shell metacharacters is handled safely.
 fn find_kdir(base: &Path) -> Option<String> {
-    let out = Command::new("bash").arg("-c")
-        .arg(format!("find '{}/src' -maxdepth 2 -name .config -printf '%h\\n' 2>/dev/null | head -1", base.display()))
-        .output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    let src = base.join("src");
+    // depth 1: src/<kdir>/.config ; depth 2: src/<kdir>/<sub>/.config
+    let rd = std::fs::read_dir(&src).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) { continue; }
+        if p.join(".config").is_file() { return Some(p.display().to_string()); }
+        if let Ok(rd2) = std::fs::read_dir(&p) {
+            for e2 in rd2.flatten() {
+                let p2 = e2.path();
+                if e2.file_type().map(|t| t.is_dir()).unwrap_or(false) && p2.join(".config").is_file() {
+                    return Some(p2.display().to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn first_dir(base: &Path, prefix: &str) -> Option<String> {
