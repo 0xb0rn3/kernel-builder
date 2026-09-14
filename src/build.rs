@@ -163,32 +163,90 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     Ok(())
 }
 
-/// Roll back to the previously-built kernel: reinstall the newest linux-<kname> package archived in
+/// Read pkgname + pkgver from a package's .PKGINFO. argv-based (path passed as an OS arg, never
+/// through a shell) so spaces/metacharacters in the path are safe. Returns None if not a readable
+/// package. Identity comes from metadata, NOT the filename.
+fn pkg_identity(pkg: &Path) -> Option<(String, String)> {
+    let out = Command::new("bsdtar").arg("-xOf").arg(pkg).arg(".PKGINFO").output().ok()?;
+    if !out.status.success() { return None; }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (mut name, mut ver) = (None, None);
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("pkgname = ") { name = Some(v.trim().to_string()); }
+        else if let Some(v) = line.strip_prefix("pkgver = ") { ver = Some(v.trim().to_string()); }
+    }
+    match (name, ver) { (Some(n), Some(v)) => Some((n, v)), _ => None }
+}
+
+/// Compare two pkgvers using pacman's own `vercmp` (authoritative); fall back to a byte compare only
+/// if vercmp is unavailable. Returns Ordering of a vs b.
+fn vercmp(a: &str, b: &str) -> std::cmp::Ordering {
+    if let Ok(out) = Command::new("vercmp").arg(a).arg(b).output() {
+        if out.status.success() {
+            let n: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
+            return n.cmp(&0);
+        }
+    }
+    a.cmp(b)
+}
+
+/// Roll back to the previously-built kernel: reinstall the retained linux-<kname> package archived in
 /// prev/. This is the mechanism the ArxOS kernel gate proved is REQUIRED — a same-name pacman upgrade
 /// deletes the prior version's /usr/lib/modules, so a saved kernel image alone cannot boot cleanly;
 /// reinstalling the retained package restores the module tree + rebuilds the initramfs via pacman hooks.
+///
+/// Selection is done in Rust (no shell): scan prev/, accept only real package archives (exact
+/// .pkg.tar.{zst,xz,gz,} extensions — never .sig or other suffixes), read each one's .PKGINFO for its
+/// true pkgname/pkgver, pick the highest-version linux-<kname> by pacman vercmp, and pair it with the
+/// linux-<kname>-headers package OF THE SAME VERSION. pacman -U is invoked argv-based via sudo.
 pub fn rollback(p: &Plan) -> io::Result<()> {
     if p.distro != Distro::Arch {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "akt rollback currently supports the Arch path only"));
     }
     let dd = data_dir();
     let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/arch-{}", dd.display(), p.flavor.key));
-    let prev = format!("{work}/cos/linux-cachyos/prev");
-    // Use `find` (empty on no-match), never `ls` on a glob: an unmatched glob makes `ls` list the
-    // cwd instead. Filter to the wanted class BEFORE picking the newest by mtime, so the kernel
-    // package and its headers never shadow each other.
-    let script = format!(
-        "set -e; \
-         newest() {{ find {prev} -maxdepth 1 -type f -name 'linux-{k}-*.pkg.tar.*' -printf '%T@ %p\\n' 2>/dev/null \
-                    | grep -vE 'debug' | grep -E \"$1\" | sort -rn | head -1 | cut -d' ' -f2-; }}; \
-         PKG=$(newest '/linux-{k}-[0-9]'); \
-         HDR=$(newest '/linux-{k}-headers-'); \
-         if [ -z \"$PKG\" ]; then echo 'no archived previous package in {prev} (nothing to roll back to)'; exit 1; fi; \
-         echo \"rolling back to: $(basename \"$PKG\")${{HDR:+ + $(basename \"$HDR\")}}\"; \
-         sudo pacman -U --noconfirm \"$PKG\" ${{HDR:+\"$HDR\"}}; \
-         echo 'installed. Reboot and select this kernel; boot-test in a throwaway first.'",
-        prev = prev, k = p.kname);
-    step(&format!("rollback linux-{} from prev/", p.kname), Path::new(&dd), &[], &script)
+    let prev = Path::new(&work).join("cos/linux-cachyos/prev");
+    let kpkg = format!("linux-{}", p.kname);
+    let hpkg = format!("linux-{}-headers", p.kname);
+    let is_pkg = |n: &str| n.ends_with(".pkg.tar.zst") || n.ends_with(".pkg.tar.xz")
+                        || n.ends_with(".pkg.tar.gz") || n.ends_with(".pkg.tar");
+
+    let rd = std::fs::read_dir(&prev).map_err(|_| {
+        io::Error::new(io::ErrorKind::NotFound,
+            format!("no archived packages in {} (nothing to roll back to)", prev.display()))
+    })?;
+    let mut kernels: Vec<(String, std::path::PathBuf)> = vec![]; // (pkgver, path)
+    let mut headers: Vec<(String, std::path::PathBuf)> = vec![];
+    for e in rd.flatten() {
+        let path = e.path();
+        if !e.file_type().map(|t| t.is_file()).unwrap_or(false) { continue; }
+        if !is_pkg(&e.file_name().to_string_lossy()) { continue; }        // reject .sig/other suffixes
+        let Some((name, ver)) = pkg_identity(&path) else { continue };    // identity from metadata
+        if name == kpkg { kernels.push((ver, path)); }
+        else if name == hpkg { headers.push((ver, path)); }
+    }
+    if kernels.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::NotFound,
+            format!("no archived {} package in {} (nothing to roll back to)", kpkg, prev.display())));
+    }
+    kernels.sort_by(|a, b| vercmp(&a.0, &b.0));
+    let (kver, kpath) = kernels.last().unwrap().clone();
+    let hmatch = headers.iter().find(|(hv, _)| *hv == kver).map(|(_, hp)| hp.clone());
+
+    println!("rolling back to {} {}", kpkg, kver);
+    println!("  kernel : {}", kpath.display());
+    let mut args: Vec<std::ffi::OsString> =
+        vec!["pacman".into(), "-U".into(), "--noconfirm".into(), kpath.clone().into()];
+    match &hmatch {
+        Some(hp) => { println!("  headers: {}", hp.display()); args.push(hp.clone().into()); }
+        None => println!("  headers: none matching version {} (installing kernel only)", kver),
+    }
+    let status = Command::new("sudo").args(&args).status()?;   // argv-based, no shell interpolation
+    if !status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "pacman -U failed"));
+    }
+    println!("installed {} {}. Reboot and select this kernel; boot-test in a throwaway VM first.", kpkg, kver);
+    Ok(())
 }
 
 fn build_debian(p: &Plan) -> io::Result<()> {
