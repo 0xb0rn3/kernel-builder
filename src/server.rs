@@ -19,7 +19,31 @@ use std::time::Duration;
 const HTML: &str = include_str!("../ui/index.html");
 const MAX_HEADER_LINE: u64 = 8 * 1024;   // per-line cap on the request line + each header
 const MAX_HEADERS: usize = 100;          // cap on header count
-const READ_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_LOG_BYTES: usize = 256 * 1024; // cap on the log tail returned to /api/log
+const READ_TIMEOUT: Duration = Duration::from_secs(15);   // per blocking read
+const REQUEST_DEADLINE: Duration = Duration::from_secs(20); // whole request-header phase
+
+/// A per-run random token required on state-changing (POST) requests, so a same-machine client that
+/// can spoof the Host header still cannot trigger a build without reading the served page. 128 bits
+/// of /dev/urandom, hex. Falls back to a pid+time seed only if urandom is unreadable (still per-run).
+fn gen_token() -> String {
+    let mut buf = [0u8; 16];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).is_ok() {
+        return buf.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos()).unwrap_or(0) ^ (std::process::id() as u128);
+    format!("{seed:032x}")
+}
+
+/// Constant-time string equality (avoids leaking the token via compare timing).
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() { return false; }
+    let mut diff = 0u8;
+    for i in 0..a.len() { diff |= a[i] ^ b[i]; }
+    diff == 0
+}
 
 /// Per-user, non-world-writable log path (avoids the classic /tmp/<fixed-name> symlink hijack).
 fn log_path() -> std::path::PathBuf {
@@ -40,6 +64,22 @@ fn open_log() -> std::io::Result<std::fs::File> {
 // O_NOFOLLOW without pulling in the libc crate.
 fn libc_o_nofollow() -> i32 { 0o400000 }
 
+/// Read the tail of the build log for /api/log: open O_NOFOLLOW (never through a symlink) and return
+/// at most MAX_LOG_BYTES, so a symlink-hijacked or huge/streamed log can neither redirect the read
+/// nor exhaust memory.
+fn read_log_tail() -> std::io::Result<String> {
+    let mut f = std::fs::OpenOptions::new().read(true)
+        .custom_flags(libc_o_nofollow()).open(log_path())?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len > MAX_LOG_BYTES as u64 {
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::End(-(MAX_LOG_BYTES as i64)))?;
+    }
+    let mut buf = Vec::with_capacity(MAX_LOG_BYTES.min(len as usize));
+    (&mut f).take(MAX_LOG_BYTES as u64).read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 pub fn serve(port: u16) -> std::io::Result<()> {
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)?;
@@ -47,9 +87,10 @@ pub fn serve(port: u16) -> std::io::Result<()> {
     let _ = Command::new("bash").arg("-c")
         .arg(format!("(xdg-open http://{addr} || sensible-browser http://{addr}) >/dev/null 2>&1 &"))
         .status();
+    let token = gen_token();               // required on POSTs; injected into the served page
     let mut build: Option<Child> = None;   // the one in-flight build, if any (work lock)
     for stream in listener.incoming() {
-        if let Ok(s) = stream { let _ = handle(s, port, &mut build); }
+        if let Ok(s) = stream { let _ = handle(s, port, &token, &mut build); }
     }
     Ok(())
 }
@@ -65,27 +106,45 @@ fn build_free(build: &mut Option<Child>) -> bool {
     }
 }
 
-fn handle(mut s: TcpStream, port: u16, build: &mut Option<Child>) -> std::io::Result<()> {
+fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -> std::io::Result<()> {
     s.set_read_timeout(Some(READ_TIMEOUT))?;
     s.set_write_timeout(Some(READ_TIMEOUT))?;
     let mut r = BufReader::new(s.try_clone()?);
+    let deadline = std::time::Instant::now() + REQUEST_DEADLINE;
 
-    // request line (size-bounded)
+    // request line (size-bounded). A line that hits the cap without a newline is malformed -> reject.
     let mut line = String::new();
-    if (&mut r).take(MAX_HEADER_LINE).read_line(&mut line)? == 0 { return Ok(()); }
+    let n = (&mut r).take(MAX_HEADER_LINE).read_line(&mut line)?;
+    if n == 0 { return Ok(()); }
+    if !line.ends_with('\n') { return respond(&mut s, "431 Request Header Fields Too Large", "text/plain", b"line too long"); }
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
 
-    // headers (count- and size-bounded); capture Host + Origin
-    let (mut host, mut origin) = (String::new(), String::new());
+    // headers (count-, size-, time-bounded); capture Host + Origin + token; reject duplicate security
+    // headers and any header line that overruns the cap without a terminator.
+    let (mut host, mut origin, mut req_token) = (String::new(), String::new(), String::new());
+    let (mut seen_host, mut seen_origin) = (false, false);
+    let mut terminated = false;
     for _ in 0..MAX_HEADERS {
+        if std::time::Instant::now() > deadline { return respond(&mut s, "408 Request Timeout", "text/plain", b"slow headers"); }
         let mut h = String::new();
-        if (&mut r).take(MAX_HEADER_LINE).read_line(&mut h)? == 0 || h == "\r\n" || h == "\n" { break; }
+        let hn = (&mut r).take(MAX_HEADER_LINE).read_line(&mut h)?;
+        if hn == 0 { break; }
+        if h == "\r\n" || h == "\n" { terminated = true; break; }
+        if !h.ends_with('\n') { return respond(&mut s, "431 Request Header Fields Too Large", "text/plain", b"header too long"); }
         let low = h.to_ascii_lowercase();
-        if let Some(v) = low.strip_prefix("host:") { host = v.trim().to_string(); }
-        else if let Some(v) = low.strip_prefix("origin:") { origin = v.trim().to_string(); }
+        if let Some(v) = low.strip_prefix("host:") {
+            if seen_host { return respond(&mut s, "400 Bad Request", "text/plain", b"duplicate host"); }
+            seen_host = true; host = v.trim().to_string();
+        } else if let Some(v) = low.strip_prefix("origin:") {
+            if seen_origin { return respond(&mut s, "400 Bad Request", "text/plain", b"duplicate origin"); }
+            seen_origin = true; origin = v.trim().to_string();
+        } else if let Some(v) = low.strip_prefix("x-akt-token:") {
+            req_token = v.trim().to_string();
+        }
     }
+    if !terminated { return respond(&mut s, "400 Bad Request", "text/plain", b"unterminated headers"); }
 
     // DNS-rebinding defense: the Host must be this loopback endpoint.
     let ok_host = host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
@@ -105,7 +164,11 @@ fn handle(mut s: TcpStream, port: u16, build: &mut Option<Child>) -> std::io::Re
     };
 
     match (method.as_str(), path) {
-        ("GET", "/") => respond(&mut s, "200 OK", "text/html; charset=utf-8", HTML.as_bytes()),
+        ("GET", "/") => {
+            // Inject the per-run token so the page (and only a client that fetched it) can POST.
+            let page = HTML.replace("__AKT_TOKEN__", token);
+            respond(&mut s, "200 OK", "text/html; charset=utf-8", page.as_bytes())
+        }
         ("GET", "/api/detect") => {
             let d = Distro::detect();
             json(&mut s, &format!("{{\"distro\":\"{}\",\"supported\":{}}}", d.name(), d != Distro::Unknown))
@@ -123,6 +186,9 @@ fn handle(mut s: TcpStream, port: u16, build: &mut Option<Child>) -> std::io::Re
             json(&mut s, &crate::explain::as_json(Distro::detect(), fl, &name))
         }
         ("POST", "/api/build") => {
+            if !ct_eq(&req_token, token) {
+                return respond(&mut s, "403 Forbidden", "text/plain", b"missing or bad build token");
+            }
             if !build_free(build) {
                 return json(&mut s, "{\"started\":false,\"error\":\"a build is already running\"}");
             }
@@ -151,7 +217,9 @@ fn handle(mut s: TcpStream, port: u16, build: &mut Option<Child>) -> std::io::Re
             }
         }
         ("GET", "/api/log") => {
-            let body = std::fs::read_to_string(log_path()).unwrap_or_default();
+            // Bounded read of the tail: open O_NOFOLLOW (don't follow a symlink planted at the path)
+            // and return at most MAX_LOG_BYTES so a huge/streamed log can't exhaust memory.
+            let body = read_log_tail().unwrap_or_default();
             respond(&mut s, "200 OK", "text/plain; charset=utf-8", body.as_bytes())
         }
         _ => respond(&mut s, "404 Not Found", "text/plain", b"not found"),

@@ -68,6 +68,26 @@ fn step(label: &str, dir: &Path, env: &[(&str, &str)], script: &str) -> io::Resu
     Ok(())
 }
 
+/// A cross-process advisory build lock (flock) held for the lifetime of the returned guard, and
+/// released automatically when the process exits or the guard drops — even on crash. Shared by the
+/// CLI and the GUI (both go through build_arch/build_debian), so two builds can never mutate the same
+/// work dir at once (makepkg -C / rm -rf would otherwise corrupt an in-flight tree). A per-process
+/// Option<Child> could not cover a second process; this can.
+struct BuildLock(#[allow(dead_code)] std::fs::File);
+extern "C" { fn flock(fd: i32, op: i32) -> i32; }
+fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
+    use std::os::unix::io::AsRawFd;
+    let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+        .open(work.join(".akt-build.lock"))?;
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    if unsafe { flock(f.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        return Err(io::Error::new(io::ErrorKind::WouldBlock,
+            format!("another akt build is already running in {} (build lock held)", work.display())));
+    }
+    Ok(BuildLock(f))
+}
+
 pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
     if plan.distro == Distro::Unknown {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported host (need Arch- or Debian-family)"));
@@ -91,6 +111,7 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/arch-{}", dd.display(), p.flavor.key));
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
+    let _lock = acquire_build_lock(workp)?;   // cross-process (CLI+GUI) lock; held until this returns
     let frag = dd.join("config/arxos.fragment");
     let initial = resources::detect(workp)?;
     initial.report();
@@ -292,6 +313,7 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/debian-{}", dd.display(), p.flavor.key));
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
+    let _lock = acquire_build_lock(workp)?;   // cross-process (CLI+GUI) lock; held until this returns
     let frag = dd.join("config/arxos.fragment");
     resources::detect(workp)?.report();
 
@@ -507,5 +529,16 @@ mod tests {
     #[test]
     fn installed_pkgver_absent_is_none() {
         assert!(installed_pkgver("definitely-not-a-real-package-xyzzy").is_none());
+    }
+
+    #[test]
+    fn build_lock_is_exclusive() {
+        let dir = std::env::temp_dir().join(format!("akt-lock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = acquire_build_lock(&dir).expect("first lock");
+        assert!(acquire_build_lock(&dir).is_err(), "second concurrent lock must fail");
+        drop(held);
+        assert!(acquire_build_lock(&dir).is_ok(), "lock frees after the guard drops");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

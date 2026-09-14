@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="akt-token" content="__AKT_TOKEN__">
 <title>ARXOS Kernel Tuner</title>
 <meta name="color-scheme" content="dark">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -212,7 +213,8 @@ $('#outpath').addEventListener('input', debounce(()=>{ outpath=$('#outpath').val
 async function startBuild(dry){
   $('#buildstate').textContent = dry?'dry run…':'building…';
   $('#log').hidden=false;
-  const r=await fetch('/api/build?'+qs()+(dry?'&dry=1':''),{method:'POST'});
+  const aktTok=(document.querySelector('meta[name=akt-token]')||{}).content||'';
+  const r=await fetch('/api/build?'+qs()+(dry?'&dry=1':''),{method:'POST',headers:{'X-Akt-Token':aktTok}});
   const j=await r.json().catch(()=>({started:false}));
   if(!j.started){ $('#buildstate').textContent='could not start: '+(j.error||'error'); return; }
   if(poll) clearInterval(poll);
