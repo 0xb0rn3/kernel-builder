@@ -1039,7 +1039,7 @@ b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')
         let input = r#"source+=("\${_patchsource}/sched/0001-bore-cachy.patch")
 b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')"#;
         let error = repair_cachyos_conditional_b2sums_text(input, "bore", "thin", "source = config\nb2sums = SKIP").unwrap_err();
-        assert!(error.to_string().contains("inconsistent source/checksum arrays"));
+        assert!(error.to_string().contains("exactly one checksum for sched/0001-bore-cachy.patch"));
     }
 
     // vercmp must use real version ordering, not byte ordering (the classic 7.9 vs 7.10 trap).
