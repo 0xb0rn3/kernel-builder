@@ -2,9 +2,9 @@
 
 # ARXOS Kernel Tuner
 
-**A tuned, hardened kernel on Arch or Debian, in one tool.**
+**Machine-aware kernel builds for Arch and Debian targets, in one tool.**
 
-Performance tuning · Kernel hardening · Resource-aware builds · Local GUI
+Hardware inventory · Performance tuning · Kernel hardening · Resource-aware builds · Local GUI
 
 <sub>An <a href="https://arxos.uk">ArxOS</a> tool by <a href="https://stingraylabs.pages.dev">Stingray Labs</a>.</sub>
 
@@ -12,17 +12,30 @@ Performance tuning · Kernel hardening · Resource-aware builds · Local GUI
 
 ## What it does
 
-`akt` orchestrates tuned kernel builds on supported Arch-family and Debian-family
-Linux hosts. It checks required configuration before the long compile. A passing
-configuration check is not runtime or security certification.
+`akt` detects the running machine and recommends conservative starting points based on CPU
+features, available/logical CPUs, RAM, cgroup limits, free build disk, exposed thermal sensors,
+CPU-frequency policy, and battery/AC state. Missing telemetry is reported as unknown rather
+than guessed. Hardware recommendations are advisory, not a hardware safety guarantee.
 
-- **Arch family** (Arch, CachyOS, EndeavourOS, ...): forks the CachyOS `linux-cachyos` recipe
-  (BORE, Clang ThinLTO, BBRv3, 1000 Hz, x86-64-v3), overlays the ARXOS config fragment + patches,
-  and builds a pacman package `linux-arxos` (+ headers).
-- **Debian family** (Debian, Ubuntu, Kali): takes Debian kernel source, requests
-  tuning and hardening options, accepts optional local patches, and builds
-  `linux-image-*-arxos.deb` (+ headers). Available options depend on the source;
-  a configuration request does not add a missing scheduler or networking patch.
+- **Arch-family target**: builds from the CachyOS `linux-cachyos` PKGBUILD, applies the ArxOS
+  configuration and patches, and creates a pacman package plus headers. The recipe supplies
+  CachyOS-specific tuning where the selected upstream revision supports it.
+- **Debian-family target**: starts from Debian kernel source, applies the ArxOS configuration and
+  local patches, then produces `.deb` image/header packages. Debian source does not automatically
+  contain BORE or BBRv3 patches; unsupported requested features must be visible and verified,
+  not described as present merely because a config command was attempted.
+- **Cross-target builds**: `--target-distro arch` or `--target-distro debian` can select the other
+  package family on an x86-64 Linux host using Podman or Docker. The target builder runs in a
+  disposable container and writes package artifacts to the selected output directory; this
+  avoids installing the target distro's build dependencies onto the host. It is still a Linux
+  container build, not a virtual machine or cross-architecture compiler.
+- **Source traceability**: Arch builds report the exact CachyOS source commit. `--source-ref`
+  can select an Arch/CachyOS tag, branch, or commit; leave it unset for the rolling source path.
+
+The hardening overlay requests allocation/free memory initialization, disabled
+hibernation, strict IOMMU defaults, early lockdown LSM, IMA, livepatch capability,
+and restricted kernel logs. These controls have platform and policy limits;
+they do not guarantee protection against every form of memory capture.
 
 The hardening overlay requests allocation/free memory initialization, disabled
 hibernation, strict IOMMU defaults, early lockdown LSM, IMA, livepatch capability,
@@ -39,20 +52,67 @@ multi-hour compile. `akt gate <config>` runs the same check standalone.
 ## Usage
 
 ```sh
-akt detect                 # host distro + which build path applies
-akt resources --json       # CPU/RAM/disk plan, using AKT_WORK or current directory
-akt explain                # what each option means for your custom kernel
-akt plan                   # print the tune plan (base, tunes, patches), no build
-akt patches                # list every patch that will be applied, in order
-akt build                  # build a tuned kernel for this host
-akt build --patch p.patch  # also apply your own patch (file or dir); repeatable, fail-fast
-akt build --name mykernel  # rename the kernel: builds linux-mykernel (default: linux-arxos)
-akt build --flavor rt      # real-time flavor (PREEMPT_RT + BORE)
-akt build --dry-run        # show the plan and check resources without building
-akt rollback               # reinstall the previous kernel package from prev/ (see Rollback below)
-akt gate path/to/.config   # verify the hardening delta is present
-akt gui                    # local web GUI at http://127.0.0.1:8787
+akt detect                                      # host distro + native package path
+akt system                                      # hardware inventory + per-machine recommendations
+akt system --json                              # machine-readable inventory/recommendations
+akt resources --json                           # CPU/RAM/cgroup/disk build-resource plan
+akt explain                                     # explain performance/security settings
+akt plan                                        # show the host-native plan, no build
+akt plan --target-distro debian                 # inspect a Debian package plan from any supported host
+akt patches                                     # list patches applied by the selected target
+akt build                                       # build for the host distribution
+akt build --target-distro debian                # build a .deb target from an Arch-family host (Podman/Docker)
+akt build --target-distro arch                  # build a pacman target from a Debian-family host (Podman/Docker)
+akt build --cpu-target portable --max-jobs 4    # portable CPU target + cap normal compile jobs
+akt build --max-jobs 4 --thinlto-jobs 2          # independently cap ThinLTO backends
+akt build --hz 500 --hugepages madvise          # selectable timer rate and THP default policy
+akt build --source-ref <tag-or-commit>          # pin the Arch/CachyOS recipe source
+akt build --performance-governor                # opt-in to performance governor as kernel default
+akt build --patch p.patch                       # apply an additional patch; repeatable, fail-fast
+akt build --name mykernel                       # build linux-mykernel instead of linux-arxos
+akt build --flavor rt                           # request the real-time profile (source support is required)
+akt build --dry-run                             # show plan and inspect resources without compiling
+akt rollback                                    # reinstall the previous host kernel package
+akt gate path/to/.config                        # verify the hardening delta
+akt gui                                         # local web GUI at http://127.0.0.1:8787
 ```
+
+## Machine inventory and tuning recommendations
+
+Run `akt system` before building. It reports the OS, machine model when exposed by DMI, CPU model
+and instruction flags, logical/physical core estimate, total and available RAM, swap, CPU-frequency
+driver/governor, reported maximum frequency, exposed thermal zones, DRM GPU devices, battery/AC
+status, work-filesystem free space, and the resource planner's current job ceilings. Use
+`akt system --json` for automation. Sensor access differs by firmware and kernel; a missing reading
+is shown as unknown. Temperature is a point-in-time reading and is not predictive thermal control.
+
+The command and GUI provide a one-click **Apply recommendations** action. It chooses an initial CPU
+target from exposed CPU flags, recommends a conservative job cap, suggests fewer ThinLTO backends
+for laptop/battery operation, leaves the performance governor opt-in, and defaults THP to
+`madvise`. The suggested timer rate starts at 500 Hz when a battery device is detected and at
+1000 Hz otherwise; this is a benchmark starting point, not a claim that one rate is universally
+faster or more efficient.
+
+| Setting | Behavior | Trade-off / guardrail |
+|---|---|---|
+| CPU baseline | `auto` selects the highest detected x86-64 ISA level; choose `portable` or `v1` for broad compatibility, or explicitly choose `v2`, `v3`, `v4` | Higher ISA targets can make a package fail to boot on older CPUs. `auto` is machine-specific, not portable. |
+| Timer rate (`--hz`) | Select 100, 250, 300, 500, 600, 750 or 1000 Hz | Higher is not automatically faster; benchmark latency, power and throughput on representative workloads. |
+| THP (`--hugepages`) | `madvise` by default, or `always` | `madvise` is a conservative general-purpose starting point; test memory-intensive workloads before changing it. PREEMPT_RT may constrain available options. |
+| Normal compiler jobs (`--max-jobs`) | `auto` or positive integer; still bounded by CPU/RAM/cgroup/disk planning | Start lower on thermally constrained laptops; resource detection is a snapshot, not active temperature control. |
+| ThinLTO backends (`--thinlto-jobs`) | Independent `auto` or positive integer cap | Link-time optimization can consume substantial memory; lower this separately if final linking is the bottleneck. |
+| Performance governor | Opt-in using `--performance-governor` | Changes the kernel's default governor choice where supported; it does not itself configure firmware or guarantee higher clocks. Usually leave disabled for battery-oriented laptops. |
+| CachyOS source ref | Optional `--source-ref REF` on Arch target | Record/pin a reviewed tag or commit for repeatable recipe inputs; a rolling build can change as upstream changes. |
+
+Example for an ArxOS/Arch laptop where portability matters more than a machine-specific ISA:
+
+```sh
+akt system
+akt build --cpu-target portable --max-jobs 4 --thinlto-jobs 2 --hz 500 --hugepages madvise
+```
+
+The ISA recommendation only uses instruction flags visible to the current Linux environment. The
+tool does not overclock the CPU, undervolt it, change firmware power limits, or continuously throttle
+a build in response to temperature. Always test performance changes against a known baseline.
 
 ## Rollback
 
@@ -80,45 +140,45 @@ you commit to a long compile. Add `--json` to `detect` / `plan` / `explain` / `g
 
 ## Automatic build resources
 
-Both build paths size jobs from available CPU parallelism (including affinity and
-CPU quotas) and available RAM. The planner also checks visible cgroup v2 memory
-limits at every ancestor and requires 60 GiB free on the work filesystem.
-It leaves one logical CPU when possible, reserves up to 4 GiB RAM, budgets
-2 GiB per compiler job, and caps ThinLTO backends at four. Swap is not counted.
-Use `AKT_MAX_JOBS=2 akt build` to lower the cap; it cannot exceed detection.
-`AKT_WORK=/path/to/work akt resources --json` inspects that filesystem.
-Detection runs before preparation and again before compilation. It is a snapshot,
-not an OOM guarantee or continuous load controller. Large kernels can need more
-than the disk floor. Unsupported cgroup layouts fail with an explanation.
+Build parallelism is calculated from available CPUs, affinity/quotas, available RAM, visible
+cgroup v2 ancestor limits, and free disk on the workspace filesystem. The planner leaves one logical
+CPU where possible, reserves host memory, budgets 2 GiB per compiler job, and caps ThinLTO backends
+at four by default. Swap is not counted. A separate `AKT_MAX_LTO_JOBS` / `--thinlto-jobs` cap
+controls ThinLTO backends independently of `AKT_MAX_JOBS` / `--max-jobs`.
 
-The Arch recipe's explicit job flags and Debian make command use the computed
-limit. ThinLTO flags are appended to the prepared kernel Makefile without replacing
-architecture linker flags. Unknown recipe or ThinLTO layouts stop for review.
-The planner is std-only Rust, embedded in `akt`, and shared with the distribution
-builder. The GUI uses this same build engine. `akt plan` describes the feature
-plan; `akt resources` inspects resource limits without starting a build.
+`--max-jobs N` and `--thinlto-jobs N` are upper bounds: the detected resource plan can lower them.
+Use `auto` to return to the planner default. The GUI exposes both caps and the machine-recommended
+starting values. Detection runs before preparation and again before compilation; it is a snapshot,
+not an OOM guarantee or continuous temperature controller. Large kernel builds may need more than
+the 60 GiB minimum free-space floor. Unsupported/unreadable cgroup-v2 layouts fail with an
+explanation rather than guessing a larger job count.
+
+The Arch recipe's job flags and Debian make invocation use the calculated normal compile-job cap.
+ThinLTO flags are appended to the prepared kernel Makefile without replacing architecture linker
+flags. Unknown recipe or ThinLTO layouts stop for review. Workspaces default to a user-writable
+cache directory, separate from root-owned configuration under `/usr/share/kernel-builder`.
+Builds share a work-directory lock which remains held by build subprocesses.
 
 ```sh
+akt system --json
 AKT_WORK=/path/to/kernel-work akt resources --json
-AKT_WORK=/path/to/kernel-work AKT_MAX_JOBS=2 akt build --dry-run
-AKT_WORK=/path/to/kernel-work AKT_MAX_JOBS=2 akt build
+AKT_WORK=/path/to/kernel-work akt build --max-jobs 4 --thinlto-jobs 2 --dry-run
+AKT_WORK=/path/to/kernel-work akt build --max-jobs 4 --thinlto-jobs 2
 ```
 
-The work filesystem must exist or have an existing parent with enough free space.
-Automatic resource detection currently requires Linux cgroup v2.
-
-Builds share a work-directory lock. Current source refuses to proceed if the
-lock cannot be made inheritable by build children. This follow-up is newer than
-the v0.3.0 binaries; it does not change those published assets.
-
-This resource update does not certify the existing rolling recipe, patch-skip
-policy, package output cleanup, Debian kernel build, or resulting kernel runtime.
+The work filesystem must exist or have an existing parent with enough free space. Resource planning
+currently requires Linux cgroup v2. These checks do not certify compile success, runtime safety, or
+performance gains.
 
 ## GUI
 
-`akt gui` starts a loopback-only web UI (no telemetry, no external calls beyond Google Fonts) that
-detects the host, shows the resolved tune plan for the chosen flavor, and runs the build with a live
-log. It matches the ArxOS Control Center design language.
+`akt gui` starts a loopback-only web UI with a live build log. It shows the hardware inventory and
+conservative recommendations, provides **Apply recommendations**, and exposes flavor, package
+target, CPU baseline, timer rate, THP policy, normal compiler jobs, ThinLTO jobs, optional source
+pin, package name/revision and output location. These controls flow into the same plan/build engine
+as the CLI. The GUI has no telemetry and uses Google Fonts externally; disable network access or
+replace the font imports if a fully offline interface is required. Cross-target builds use the same
+Podman/Docker path as the CLI.
 
 ## Install
 
@@ -168,8 +228,11 @@ cargo build --release     # compile on the host, without root
 sudo ./install.sh          # install the freshly built binary + data
 ```
 
-Compiling needs `rust`/`cargo`. Building a kernel then needs the host's toolchain (Arch: `base-devel`
-`clang` `lld` `llvm`; Debian: `build-essential fakeroot libncurses-dev bison flex libssl-dev libelf-dev`).
+Compiling from source needs `rust`/`cargo`. Native Arch kernel builds need `base-devel`, Clang/LLVM,
+LLD, and the supporting kernel build tools; native Debian builds need `build-essential`, `fakeroot`,
+Clang/LLVM/LLD, and the usual kernel build dependencies. Cross-target builds need Podman or Docker;
+the tool creates a disposable target image and installs target build dependencies inside it. The
+first cross-target run may download a substantial base image and package set.
 
 ## Adding patches
 
@@ -206,17 +269,23 @@ akt patches --patch ~/my-kernel-patches/         # list what WOULD be applied, i
 
 ## Status
 
-Development tool. Resource management was added in source commit `91dffc6`.
-Host compilation succeeded; eight Rust unit tests and six integration checks
-passed in a disposable QEMU/KVM VM. See [test evidence](tests/VALIDATION.md).
+Development tool. This feature branch adds machine inventory, hardware-aware recommendations,
+tunable build/ThinLTO caps, configurable CPU baseline/tick rate/THP policy, source pinning, GUI
+controls, and disposable-container cross-target builds. It also adds a GitHub Actions workflow for
+formatting, compile checks, hardware-inventory unit tests and a release build.
 
-For lock-error and local HTTP regression checks, see
-[the non-destructive VM procedure](tests/hardening-vm.md). Compile test binaries
-on the host, then execute them only inside the identified disposable VM.
+**Validation status for the new features:** not yet confirmed by CI in this branch, and no end-to-end
+kernel build was run as part of these changes. Container availability, source-specific Kconfig
+options, package output and successful boot remain to be tested. Do not install a newly built kernel
+on the daily-driver host until the code passes CI and the resulting packages are installed and
+boot-tested in a disposable VM.
 
-This does not establish end-to-end Arch/Debian build success, boot safety,
-performance gains, or hardware support. Compile on the host; run regression,
-installation and runtime acceptance in a throwaway VM before hardware use.
+For existing lock-error and local HTTP regression checks, see
+[the non-destructive VM procedure](tests/hardening-vm.md). Compile test binaries on the host, then
+execute integration and runtime acceptance only inside the identified disposable VM.
+
+Passing a config gate is not security certification. The tool cannot promise performance gains or
+support for every device; benchmark against a known kernel and keep a bootable fallback available.
 
 ## Packaging a release
 
