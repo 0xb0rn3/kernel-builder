@@ -213,6 +213,7 @@ pub struct SystemInfo {
     pub cpu_max_mhz: Option<u64>, pub cpu_governor: Option<String>, pub cpu_driver: Option<String>,
     pub temperatures: Vec<(String, f64, Option<f64>)>, pub gpus: Vec<String>,
     pub battery_percent: Option<u8>, pub battery_status: Option<String>, pub ac_online: Option<bool>, pub work_free_gib: Option<u64>,
+    pub resource_jobs: Option<usize>, pub thinlto_jobs: Option<usize>,
 }
 impl SystemInfo {
     pub fn detect(work: &Path) -> Self {
@@ -230,6 +231,7 @@ impl SystemInfo {
         ].into_iter().flatten().filter(|s| !s.is_empty() && s != "None" && s != "To Be Filled By O.E.M.")
           .collect::<Vec<_>>().join(" ");
         let (battery_percent, battery_status, ac_online) = battery_info();
+        let resource_plan = crate::resources::detect(work).ok();
         Self {
             os_id, os_like, os_pretty, arch: std::env::consts::ARCH.to_string(),
             machine: if machine.is_empty() { "hardware model unavailable".to_string() } else { machine },
@@ -240,6 +242,8 @@ impl SystemInfo {
             cpu_governor: first_cpu_text("scaling_governor"), cpu_driver: first_cpu_text("scaling_driver"),
             temperatures: temperatures(), gpus: gpus(), battery_percent, battery_status, ac_online,
             work_free_gib: disk_free_gib(work),
+            resource_jobs: resource_plan.as_ref().map(|r| r.jobs),
+            thinlto_jobs: resource_plan.as_ref().map(|r| r.link_jobs),
         }
     }
     pub fn recommended_cpu_target(&self) -> String {
@@ -256,6 +260,15 @@ impl SystemInfo {
         v.push("Keep ThinLTO as the starting point; benchmark against no LTO with the same workload before claiming a runtime gain.".to_string());
         v.push("Use THP=madvise as the laptop-friendly starting point; choose always only after memory-workload benchmarks.".to_string());
         v.push("Leave the kernel's performance-governor default disabled on laptops unless you deliberately prioritize responsiveness over power use.".to_string());
+        if self.battery_percent.is_some() {
+            v.push("Battery-powered machine detected: keep THP=madvise, compare 500 Hz with 1000 Hz on representative workloads, and keep forced performance-governor default off unless you accept the power trade-off.".to_string());
+        } else {
+            v.push("No battery device was detected; 1000 Hz is a reasonable responsiveness baseline, but compare latency and throughput against lower tick rates before claiming a win.".to_string());
+        }
+        match (self.resource_jobs, self.thinlto_jobs) {
+            (Some(jobs), Some(link_jobs)) => v.push(format!("The resource planner currently allows up to {jobs} make jobs and {link_jobs} ThinLTO backends from visible CPU/RAM/cgroup/disk limits. This is a build-resource ceiling, not a thermal guarantee; on a laptop, cap jobs lower if sustained temperatures rise.")),
+            _ => v.push("The resource planner could not determine a safe job ceiling from the visible cgroup/memory/disk data. Review cgroup v2 visibility and available build disk before starting compilation.".to_string()),
+        }
         if self.logical_cpus < 4 || self.ram_total_mib.unwrap_or(0) < 8192 {
             v.push("Conservative build ceiling: start with AKT_MAX_JOBS=2 to preserve memory and desktop responsiveness.".to_string());
         } else if self.logical_cpus >= 8 && self.ram_total_mib.unwrap_or(0) >= 16384 {
@@ -289,7 +302,7 @@ impl SystemInfo {
         let gpus = self.gpus.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
         let recs = self.recommendations().iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
         format!(
-            "{{\"os_id\":{},\"os_like\":{},\"os_pretty\":{},\"arch\":{},\"machine\":{},\"cpu_vendor\":{},\"cpu_model\":{},\"logical_cpus\":{},\"physical_cores\":{},\"x86_64_level\":{},\"x86_64_level_label\":{},\"recommended_cpu_target\":{},\"ram_total_mib\":{},\"ram_available_mib\":{},\"swap_total_mib\":{},\"cpu_max_mhz\":{},\"cpu_governor\":{},\"cpu_driver\":{},\"temperatures\":[{}],\"gpus\":[{}],\"battery_percent\":{},\"battery_status\":{},\"ac_online\":{},\"work_free_gib\":{},\"recommendations\":[{}]}}",
+            "{{\"os_id\":{},\"os_like\":{},\"os_pretty\":{},\"arch\":{},\"machine\":{},\"cpu_vendor\":{},\"cpu_model\":{},\"logical_cpus\":{},\"physical_cores\":{},\"x86_64_level\":{},\"x86_64_level_label\":{},\"recommended_cpu_target\":{},\"ram_total_mib\":{},\"ram_available_mib\":{},\"swap_total_mib\":{},\"cpu_max_mhz\":{},\"cpu_governor\":{},\"cpu_driver\":{},\"temperatures\":[{}],\"gpus\":[{}],\"battery_percent\":{},\"battery_status\":{},\"ac_online\":{},\"work_free_gib\":{},\"resource_jobs\":{},\"thinlto_jobs\":{},\"recommendations\":[{}]}}",
             json_str(&self.os_id), json_str(&self.os_like), json_str(&self.os_pretty), json_str(&self.arch), json_str(&self.machine),
             json_str(&self.cpu_vendor), json_str(&self.cpu_model), self.logical_cpus,
             self.physical_cores.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), self.x86_level,
@@ -303,7 +316,9 @@ impl SystemInfo {
             self.battery_percent.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
             self.battery_status.as_deref().map(json_str).unwrap_or_else(|| "null".to_string()),
             self.ac_online.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
-            self.work_free_gib.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), recs)
+            self.work_free_gib.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+            self.resource_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+            self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), recs)
     }
     pub fn report(&self) {
         println!("== hardware detected ==");
@@ -316,6 +331,7 @@ impl SystemInfo {
         println!("  swap       : {} MiB", self.swap_total_mib.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
         println!("  CPU policy : governor={} driver={} max-frequency={} MHz", self.cpu_governor.as_deref().unwrap_or("unknown"), self.cpu_driver.as_deref().unwrap_or("unknown"), self.cpu_max_mhz.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
         println!("  work disk  : {} GiB free", self.work_free_gib.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
+        println!("  job ceiling: make={} ThinLTO={}", self.resource_jobs.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()), self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
         for (kind, c, critical) in &self.temperatures {
             println!("  thermal    : {kind} {c:.1}°C{}", critical.map(|v| format!(" (critical {v:.1}°C)")).unwrap_or_default());
         }
