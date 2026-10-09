@@ -172,7 +172,21 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
           <option value="6">6</option>
           <option value="8">8</option>
         </select>
-        <span class="hint">Your selected cap is still clamped to available CPUs, RAM and build disk.</span>
+        <span class="hint">Your selected cap is clamped to available CPUs, RAM and build disk.</span>
+      </label>
+      <label>ThinLTO link jobs
+        <select id="thinltoJobs" class="tin">
+          <option value="auto">Auto · up to planner limit</option>
+          <option value="1">1 · lowest link memory</option>
+          <option value="2">2 · laptop-friendly cap</option>
+          <option value="3">3</option>
+          <option value="4">4 · planner maximum</option>
+        </select>
+        <span class="hint">Independent from normal make jobs. This only affects ThinLTO builds.</span>
+      </label>
+      <label>Arch recipe source ref
+        <input id="sourceRef" class="tin" type="text" placeholder="blank = rolling latest" spellcheck="false" autocomplete="off">
+        <span class="hint">Optional CachyOS recipe tag, branch or commit. Debian source version is managed by apt.</span>
       </label>
       <label>Transparent huge pages
         <select id="thp" class="tin">
@@ -237,7 +251,7 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
 <script>
 const $=s=>document.querySelector(s);
 let flavor='default', kname='arxos', pkgrel='', outpath='', poll=null;
-let target='host', cpuTarget='auto', hz='1000', hugepages='madvise', maxJobs='auto', performanceGovernor=false;
+let target='host', cpuTarget='auto', hz='1000', hugepages='madvise', maxJobs='auto', thinltoJobs='auto', sourceRef='', performanceGovernor=false;
 let lastSystemInfo=null;
 let hostDistro='unknown', hostSupported=false;
 const ABOUT={default:'balanced daily driver (BORE + ThinLTO)', rt:'real-time (PREEMPT_RT; BORE depends on target source)', hardened:'hardened profile (available controls are verified before compile)'};
@@ -247,7 +261,7 @@ function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>f
 
 async function jget(u){ try{ const r=await fetch(u); return r.ok?r.json():null; }catch(e){ return null; } }
 function qs(){
-  let q='flavor='+enc(flavor)+'&name='+enc(kname)+'&target='+enc(target)+'&cpu='+enc(cpuTarget)+'&hz='+enc(hz)+'&thp='+enc(hugepages)+'&maxjobs='+enc(maxJobs)+'&pgov='+(performanceGovernor?'1':'0');
+  let q='flavor='+enc(flavor)+'&name='+enc(kname)+'&target='+enc(target)+'&cpu='+enc(cpuTarget)+'&hz='+enc(hz)+'&thp='+enc(hugepages)+'&maxjobs='+enc(maxJobs)+'&ltojobs='+enc(thinltoJobs)+'&source='+enc(sourceRef)+'&pgov='+(performanceGovernor?'1':'0');
   if(pkgrel) q+='&pkgrel='+enc(pkgrel);
   if(outpath) q+='&out='+enc(outpath);
   return q;
@@ -271,6 +285,7 @@ function refreshTargetPath(){
   $('#targetNote').textContent=target==='host'
     ? 'Builds for the host distribution. Requested Kconfig tunes are verified before compilation.'
     : (target===hostDistro?'Selected target matches this host.':'Cross-target build downloads a base image and build dependencies; it does not install packages on the host.');
+  $('#sourceRef').disabled=(target==='debian' || (target==='host' && hostDistro==='debian'));
 }
 function fill(id,arr){ const el=$(id); el.innerHTML=''; (arr||[]).forEach(t=>{const s=document.createElement('span');s.textContent=t;el.appendChild(s);}); if(!arr||!arr.length){const s=document.createElement('span');s.className='dim';s.textContent='—';el.appendChild(s);} }
 function renderOpts(id,items,cls){ const el=$(id); el.innerHTML=''; (items||[]).forEach(it=>{ const d=document.createElement('div'); d.className='opt'; const c=document.createElement('span'); c.className='h'+(cls?' '+cls:''); c.textContent=it.option; const m=document.createElement('span'); m.className='mean'; m.textContent=it.meaning; d.append(c,m); el.appendChild(d); }); }
@@ -325,7 +340,7 @@ async function loadSystem(){
     ['Battery / power',battery+' · '+power],
     ['Build filesystem free',showValue(d.work_free_gib,' GiB')],
     ['Resource planner ceiling',showValue(d.resource_jobs,' make jobs')+' · '+showValue(d.thinlto_jobs,' ThinLTO backends')],
-    ['Suggested starting cap',showValue(d.recommended_max_jobs,' make jobs')]
+    ['Suggested starting caps',showValue(d.recommended_max_jobs,' make jobs')+' · '+showValue(d.recommended_thinlto_jobs,' ThinLTO jobs')]
   ];
   for(const [k,v] of fields) facts.append(fact(k,v));
   for(const item of (d.recommendations||[])){ const li=document.createElement('li'); li.textContent=item; recs.append(li); }
@@ -344,6 +359,8 @@ $('#hz').addEventListener('change',e=>{ hz=e.target.value; refresh(); });
 $('#thp').addEventListener('change',e=>{ hugepages=e.target.value; refresh(); });
 $('#performanceGovernor').addEventListener('change',e=>{ performanceGovernor=e.target.checked; refresh(); });
 $('#maxJobs').addEventListener('change',e=>{ maxJobs=e.target.value; refresh(); });
+$('#thinltoJobs').addEventListener('change',e=>{ thinltoJobs=e.target.value; refresh(); });
+$('#sourceRef').addEventListener('input', debounce(()=>{ sourceRef=$('#sourceRef').value.trim(); refresh(); },350));
 $('#refreshSystem').addEventListener('click',loadSystem);
 $('#applyRecommended').addEventListener('click',()=>{
   if(!lastSystemInfo){ $('#systemState').textContent='Hardware inventory unavailable; refresh hardware before applying recommendations.'; return; }
@@ -352,11 +369,13 @@ $('#applyRecommended').addEventListener('click',()=>{
   hugepages='madvise';
   performanceGovernor=false;
   maxJobs=lastSystemInfo.recommended_max_jobs===null ? 'auto' : String(lastSystemInfo.recommended_max_jobs);
+  thinltoJobs=lastSystemInfo.recommended_thinlto_jobs===null ? 'auto' : String(lastSystemInfo.recommended_thinlto_jobs);
   $('#cpuTarget').value=cpuTarget;
   $('#hz').value=hz;
   $('#thp').value=hugepages;
   $('#performanceGovernor').checked=false;
   $('#maxJobs').value=maxJobs;
+  $('#thinltoJobs').value=thinltoJobs;
   refresh();
   $('#systemState').textContent='Conservative recommendations applied. Benchmark against another profile before treating them as faster.';
 });
