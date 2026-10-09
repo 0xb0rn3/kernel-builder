@@ -172,138 +172,183 @@ fn cpu_processor_opt(target: &str, work: &Path) -> io::Result<String> {
 // \`source\` conditionally but omits their checksums from the generic recipe's \`b2sums\`.
 // These hashes are copied from CachyOS's matching variant .SRCINFO files for the SAME
 // recipe commit. Keep this narrowly pinned: if the recipe or patch changes, fail closed.
-const CACHYOS_RECIPE_REV_7_2_9_2: &str = "59f65f1b18e642888ec3415d01aec86c0c15bf0e";
-
-fn recipe_assignment<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    text.lines().map(str::trim).find_map(|line| {
-        line.strip_prefix(key)
-            .and_then(|rest| rest.strip_prefix('='))
-            .map(str::trim)
-            .map(|value| value.trim_matches(|c| c == '\'' || c == '"'))
-    })
+#[derive(Default)]
+struct SrcInfo {
+    pkgver: Option<String>,
+    pkgrel: Option<String>,
+    sources: Vec<String>,
+    b2sums: Vec<String>,
 }
 
-fn declared_b2sums_count(text: &str) -> Option<usize> {
-    let start = text.find("b2sums=(")?;
-    let rest = &text[start..];
-    let end = rest.find(')')?;
-    Some(rest[..=end].matches('\'').count() / 2)
-}
-
-fn cachyos_conditional_patch_sums(scheduler: &str) -> Vec<(&'static str, &'static str)> {
-    const BORE: &str =
-        "03b6d236610ae00db9395819aa7578860f45ce10839fbdcee80fb8e9e9c8810896d20680c63e43c416ae23b371efd737bc0a14831e1f7d8111578c1f65bda68f";
-    const HARDENED: &str =
-        "925cfab5c28b77befa1ddba97d0fbcda1b0fec53733dcc669be2178460c690b71ee62ec7fbc3482857dd6fcc9a3925a8bb9cbd161f001321cb1441ec24a8f9d7";
-    const RT: &str =
-        "2d9ccf5217efa1b67e8cfbc4eb0b2f444f768adec03dbfea504f7b30cee87fc8acc74a24e526a0444ca0df0fb9b44ed5ba6638add07dd3e4e425487de2c2486b";
-    const BMQ: &str =
-        "4053f6a20d5030d1dd5278b6de9b718c89cfd612320d5b2cd16170afc60882ded900b36278f84b2ba3fa13945b9911fd3928e57f746c33bb30255def3b52a4aa";
-    match scheduler {
-        "bore" => vec![("sched/0001-bore-cachy.patch", BORE)],
-        "hardened" => vec![
-            ("sched/0001-bore-cachy.patch", BORE),
-            ("misc/0001-hardened.patch", HARDENED),
-        ],
-        "rt" => vec![("misc/0001-rt-i915.patch", RT)],
-        "rt-bore" => vec![
-            ("sched/0001-bore-cachy.patch", BORE),
-            ("misc/0001-rt-i915.patch", RT),
-        ],
-        "bmq" => vec![("sched/0001-prjc-cachy.patch", BMQ)],
-        _ => Vec::new(),
-    }
-}
-
-fn repair_cachyos_conditional_b2sums(
-    pkgbuild: &Path,
-    scheduler: &str,
-    lto: &str,
-    source_revision: &str,
-) -> io::Result<()> {
-    let original = std::fs::read_to_string(pkgbuild)?;
-    let updated = repair_cachyos_conditional_b2sums_text(&original, scheduler, lto, source_revision)?;
-    if updated != original {
-        std::fs::write(pkgbuild, updated)?;
-        println!("akt: restored reviewed b2sums entries for CachyOS conditional scheduler patch(es); integrity checks remain enabled.");
-    }
-    Ok(())
-}
-
-fn repair_cachyos_conditional_b2sums_text(
-    original: &str,
-    scheduler: &str,
-    lto: &str,
-    source_revision: &str,
-) -> io::Result<String> {
-    let patches = cachyos_conditional_patch_sums(scheduler);
-    if patches.is_empty() {
-        return Ok(original.to_string());
-    }
-
-    let base_sources = 3 + if matches!(lto, "thin" | "full" | "thin-dist") { 1 } else { 0 };
-    let expected_sources = base_sources + patches.len();
-    let current_sums = declared_b2sums_count(&original).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "CachyOS PKGBUILD has no parseable b2sums array")
-    })?;
-    if current_sums == expected_sources {
-        // Upstream has fixed its metadata. Let makepkg verify those published checksums.
-        return Ok(original.to_string());
-    }
-    if current_sums != base_sources {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "CachyOS PKGBUILD source/checksum count is inconsistent ({} b2sums entries; {} expected). \
-                 Refusing to skip integrity checks.",
-                current_sums, expected_sources
-            ),
-        ));
-    }
-
-    let missing: Vec<&str> = patches.iter()
-        .filter(|(_, sum)| !original.contains(sum))
-        .map(|(_, sum)| *sum)
-        .collect();
-    if missing.is_empty() {
-        // An earlier akt invocation already appended these exact reviewed sums.
-        return Ok(original.to_string());
-    }
-
-    let major = recipe_assignment(original, "_major").unwrap_or("");
-    let minor = recipe_assignment(original, "_minor").unwrap_or("");
-    let tagrel = recipe_assignment(original, "_tagrel").unwrap_or("");
-    let recipe_version = format!("{major}.{minor}-{tagrel}");
-    if source_revision != CACHYOS_RECIPE_REV_7_2_9_2 || recipe_version != "7.2.9-2" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "CachyOS recipe {recipe_version} ({source_revision}) adds scheduler patches without matching b2sums. \
-                 akt has reviewed checksums only for recipe 7.2.9-2 at {CACHYOS_RECIPE_REV_7_2_9_2}; \
-                 refusing to disable or guess source integrity checks."
-            ),
-        ));
-    }
-    for (patch_path, _) in &patches {
-        if !original.contains(patch_path) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("expected CachyOS conditional patch {patch_path} is absent; refusing automatic checksum repair"),
-            ));
+fn parse_srcinfo(text: &str) -> SrcInfo {
+    let mut info = SrcInfo::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else { continue };
+        let key = key.trim();
+        let value = value.trim().to_string();
+        match key {
+            "pkgver" if info.pkgver.is_none() => info.pkgver = Some(value),
+            "pkgrel" if info.pkgrel.is_none() => info.pkgrel = Some(value),
+            "source" | "source_x86_64" => info.sources.push(value),
+            "b2sums" | "b2sums_x86_64" => info.b2sums.push(value),
+            _ => {}
         }
     }
+    info
+}
 
-    let mut updated = original.to_string();
-    updated.push_str(
-        "\n# akt: checksums from the matching CachyOS 7.2.9-2 variant .SRCINFO; makepkg still verifies each patch\nb2sums+=(",
-    );
-    for sum in missing {
-        updated.push('\'');
-        updated.push_str(sum);
-        updated.push_str("' ");
+fn source_key(source: &str) -> &str {
+    source.split_once("::").map(|(url, _)| url).unwrap_or(source)
+}
+
+fn valid_b2sum(value: &str) -> bool {
+    value == "SKIP" || (value.len() == 128 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Lookup a source's BLAKE2 checksum from a generated .SRCINFO belonging to the exact same
+/// CachyOS package version. This deliberately reads version-controlled metadata in the checked-out
+/// recipe commit; it never trusts a newly downloaded patch's own digest as its expected checksum.
+fn checksum_in_srcinfo(
+    text: &str,
+    expected_pkgver: &str,
+    expected_pkgrel: &str,
+    requested_source: &str,
+) -> Option<String> {
+    let info = parse_srcinfo(text);
+    if info.pkgver.as_deref() != Some(expected_pkgver)
+        || info.pkgrel.as_deref() != Some(expected_pkgrel)
+        || info.sources.len() != info.b2sums.len()
+    {
+        return None;
     }
-    updated.push_str(")\n");
+    let wanted = source_key(requested_source);
+    let mut found = info.sources.iter()
+        .zip(info.b2sums.iter())
+        .filter(|(source, _)| source_key(source) == wanted)
+        .map(|(_, sum)| sum.clone());
+    let first = found.next()?;
+    if !valid_b2sum(&first) || found.any(|other| other != first) {
+        return None;
+    }
+    Some(first)
+}
+
+fn srcinfo_checksum(
+    repo_root: &Path,
+    pkgver: &str,
+    pkgrel: &str,
+    source: &str,
+) -> io::Result<String> {
+    let entries = std::fs::read_dir(repo_root)?;
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { continue; }
+        let metadata = entry.path().join(".SRCINFO");
+        let Ok(contents) = std::fs::read_to_string(&metadata) else { continue };
+        if let Some(sum) = checksum_in_srcinfo(&contents, pkgver, pkgrel, source) {
+            matches.push(sum);
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [sum] => Ok(sum.clone()),
+        [] => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "no matching source checksum found in CachyOS .SRCINFO metadata for {source} (package {pkgver}-{pkgrel}); refusing to skip integrity checks"
+            ),
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("CachyOS .SRCINFO files disagree on the checksum for {source}; refusing to choose one"),
+        )),
+    }
+}
+
+fn active_srcinfo(pkgbuild_dir: &Path, env: &[(&str, &str)]) -> io::Result<SrcInfo> {
+    let mut command = Command::new("makepkg");
+    command.arg("--printsrcinfo").current_dir(pkgbuild_dir);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "makepkg --printsrcinfo failed while resolving active source/checksum inputs: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    let info = parse_srcinfo(&String::from_utf8_lossy(&output.stdout));
+    if info.sources.is_empty() || info.pkgver.as_deref().unwrap_or("").is_empty()
+        || info.pkgrel.as_deref().unwrap_or("").is_empty()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "makepkg --printsrcinfo did not provide package version, release, and source entries",
+        ));
+    }
+    Ok(info)
+}
+
+fn replace_b2sums_array(original: &str, sums: &[String]) -> io::Result<String> {
+    let start = original.find("b2sums=(").ok_or_else(|| io::Error::new(
+        io::ErrorKind::InvalidData, "CachyOS PKGBUILD has no b2sums array",
+    ))?;
+    if original.contains("b2sums+=(") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CachyOS PKGBUILD uses an additional b2sums+= array; refusing to rewrite unknown checksum logic",
+        ));
+    }
+    let array_end = original[start..].find(')').map(|n| start + n)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unterminated b2sums array"))?;
+    let mut replacement = String::from("b2sums=(\n");
+    for sum in sums {
+        if !valid_b2sum(sum) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid checksum in selected CachyOS metadata"));
+        }
+        replacement.push_str("    '");
+        replacement.push_str(sum);
+        replacement.push_str("'\n");
+    }
+    replacement.push(')');
+    let mut updated = String::with_capacity(original.len() + replacement.len());
+    updated.push_str(&original[..start]);
+    updated.push_str(&replacement);
+    updated.push_str(&original[array_end + 1..]);
     Ok(updated)
+}
+
+/// Rebuild b2sums directly from the source URLs resolved by makepkg and the versioned .SRCINFO
+/// metadata shipped alongside this exact CachyOS recipe commit. This automatically follows upstream
+/// source and checksum changes while preserving makepkg's verification; unknown sources fail closed.
+fn sync_cachyos_b2sums(pkgbuild: &Path, repo_root: &Path, env: &[(&str, &str)]) -> io::Result<()> {
+    let original = std::fs::read_to_string(pkgbuild)?;
+    let active = active_srcinfo(pkgbuild.parent().unwrap_or(repo_root), env)?;
+    let pkgver = active.pkgver.as_deref().unwrap_or("");
+    let pkgrel = active.pkgrel.as_deref().unwrap_or("");
+    let mut sums = Vec::with_capacity(active.sources.len());
+    for source in &active.sources {
+        sums.push(srcinfo_checksum(repo_root, pkgver, pkgrel, source)?);
+    }
+    if active.sources.len() != sums.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "source/checksum count mismatch after CachyOS metadata sync"));
+    }
+    let updated = replace_b2sums_array(&original, &sums)?;
+    if updated != original {
+        std::fs::write(pkgbuild, updated)?;
+        println!(
+            "akt: synchronized {} BLAKE2 entries from matching CachyOS .SRCINFO metadata; makepkg integrity verification remains enabled.",
+            sums.len()
+        );
+    } else {
+        println!("akt: CachyOS BLAKE2 metadata already matches the checked-out source revision.");
+    }
+    Ok(())
 }
 
 fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level: bool) -> io::Result<()> {
@@ -361,6 +406,8 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     let requested_ref = p.source_ref.as_deref().unwrap_or("");
     step("[1/5] fetch CachyOS linux-cachyos", workp, &[("ARXOS_SOURCE_REF", requested_ref)],
         "set -e; if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; fi; \
+         # PKGBUILD is tool-managed; discard only local edits to that file from an interrupted/older akt run. \
+         git -C cos checkout -- linux-cachyos/PKGBUILD; \
          if [ -n \"$ARXOS_SOURCE_REF\" ]; then \
            git -C cos fetch -q --tags origin \"$ARXOS_SOURCE_REF\"; \
            git -C cos checkout -q --detach FETCH_HEAD; \
@@ -387,12 +434,7 @@ fn build_arch(p: &Plan) -> io::Result<()> {
         ("ARXOS_BUILD_JOBS", jobs.as_str()),
     ];
     resources::limit_recipe(&basep.join("PKGBUILD"))?;
-    repair_cachyos_conditional_b2sums(
-        &basep.join("PKGBUILD"),
-        p.flavor.sched,
-        p.flavor.lto,
-        &source_revision,
-    )?;
+    sync_cachyos_b2sums(&basep.join("PKGBUILD"), basep.parent().unwrap_or(basep), &env)?;
 
     // 2. de-brand + pkgrel (matches linux-arxos build.sh).
     step(&format!("[2/5] de-brand recipe -> linux-{}", p.kname), basep, &env,
@@ -887,44 +929,47 @@ mod tests {
     use std::cmp::Ordering;
 
     #[test]
-    fn cachyos_bore_recipe_checksum_repair_is_pinned_and_idempotent() {
-        let input = r#"
-_major=7.2
-_minor=9
-_tagrel=2
-source+=("${_patchsource}/sched/0001-bore-cachy.patch")
-b2sums=('archive' 'signature' 'config' 'dkms-patch')
-"#;
-        let repaired = repair_cachyos_conditional_b2sums_text(
-            input,
-            "bore",
-            "thin",
-            CACHYOS_RECIPE_REV_7_2_9_2,
-        ).unwrap();
-        assert!(repaired.contains("b2sums+=("));
-        assert!(repaired.contains("03b6d236610ae00db9395819aa7578860f45ce10839fbdcee80fb8e9e9c8810896d20680c63e43c416ae23b371efd737bc0a14831e1f7d8111578c1f65bda68f"));
-        assert_eq!(
-            repair_cachyos_conditional_b2sums_text(&repaired, "bore", "thin", CACHYOS_RECIPE_REV_7_2_9_2).unwrap(),
-            repaired
+    fn srcinfo_checksum_lookup_tracks_current_metadata() {
+        let checksum = "a".repeat(128);
+        let srcinfo = format!(
+            "pkgbase = linux-cachyos-bore\npkgver = 7.9.1\npkgrel = 3\nsource = https://example.invalid/sched/0001-bore.patch\nb2sums = {checksum}\n"
         );
+        assert_eq!(
+            checksum_in_srcinfo(&srcinfo, "7.9.1", "3", "https://example.invalid/sched/0001-bore.patch"),
+            Some(checksum)
+        );
+        assert_eq!(checksum_in_srcinfo(&srcinfo, "7.9.0", "3", "https://example.invalid/sched/0001-bore.patch"), None);
     }
 
     #[test]
-    fn cachyos_bore_checksum_repair_refuses_unknown_recipe_revision() {
-        let input = r#"
-_major=7.2
-_minor=10
-_tagrel=1
-source+=("${_patchsource}/sched/0001-bore-cachy.patch")
-b2sums=('archive' 'signature' 'config' 'dkms-patch')
-"#;
-        let err = repair_cachyos_conditional_b2sums_text(
-            input,
-            "bore",
-            "thin",
-            "unreviewed-revision",
-        ).unwrap_err();
-        assert!(err.to_string().contains("refusing to disable or guess source integrity checks"));
+    fn active_sources_get_ordered_checksums_from_versioned_srcinfo() {
+        let root = std::env::temp_dir().join(format!("akt-srcinfo-{}", std::process::id()));
+        let variant = root.join("linux-cachyos-bore");
+        std::fs::create_dir_all(&variant).unwrap();
+        let patch_sum = "b".repeat(128);
+        let archive_sum = "c".repeat(128);
+        std::fs::write(variant.join(".SRCINFO"), format!(
+            "pkgbase = linux-cachyos-bore\npkgver = 7.9.1\npkgrel = 3\nsource = https://example.invalid/kernel.tar.gz\nb2sums = {archive_sum}\nsource = https://example.invalid/sched/0001-bore.patch\nb2sums = {patch_sum}\n"
+        )).unwrap();
+        assert_eq!(srcinfo_checksum(&root, "7.9.1", "3", "https://example.invalid/sched/0001-bore.patch").unwrap(), patch_sum);
+        assert_eq!(srcinfo_checksum(&root, "7.9.1", "3", "https://example.invalid/kernel.tar.gz").unwrap(), archive_sum);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn b2sums_array_replacement_preserves_source_verification() {
+        let original = "source=('one' 'two')\nb2sums=('old1' 'old2')\n";
+        let expected = vec!["SKIP".to_string(), "d".repeat(128)];
+        let updated = replace_b2sums_array(original, &expected).unwrap();
+        assert!(updated.contains("b2sums=(\n    'SKIP'\n"));
+        assert!(updated.contains(&format!("    '{}'\n)", "d".repeat(128))));
+        assert_eq!(replace_b2sums_array(&updated, &expected).unwrap(), updated);
+    }
+
+    #[test]
+    fn b2sums_sync_rejects_unpaired_variant_metadata() {
+        let srcinfo = "pkgbase = bad\npkgver = 7.1\npkgrel = 1\nsource = one\nsource = two\nb2sums = SKIP\n";
+        assert_eq!(checksum_in_srcinfo(srcinfo, "7.1", "1", "one"), None);
     }
 
     // vercmp must use real version ordering, not byte ordering (the classic 7.9 vs 7.10 trap).
