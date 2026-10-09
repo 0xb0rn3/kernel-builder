@@ -240,6 +240,14 @@ fn main() -> ExitCode {
         eprintln!("akt: --hugepages must be madvise or always"); return ExitCode::FAILURE;
     }
     let performance_governor = has_flag(&args, "--performance-governor");
+    let max_jobs = match flag(&args, "--max-jobs") {
+        Some("auto") => { std::env::remove_var("AKT_MAX_JOBS"); None }
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if n > 0 => { std::env::set_var("AKT_MAX_JOBS", n.to_string()); Some(n) }
+            _ => { eprintln!("akt: --max-jobs must be auto or a positive integer"); return ExitCode::FAILURE; }
+        },
+        None => std::env::var("AKT_MAX_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0),
+    };
     let json = has_flag(&args, "--json");
     let fl = flavor(flag(&args, "--flavor").unwrap_or("default")).unwrap_or(&FLAVORS[0]);
     let kname = match kernel_name(flag(&args, "--name").or_else(|| flag(&args, "--rename")).unwrap_or("arxos")) {
@@ -276,7 +284,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "plan" => {
-            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel).with_tuning(cpu_target, hz, hugepages, performance_governor)
+            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_tuning(cpu_target, hz, hugepages, performance_governor)
+                .with_max_jobs(max_jobs)
                 .with_patches(extra_patches.clone(), patch_strict);
             if json { println!("{}", p.to_json()); }
             else {
@@ -292,7 +302,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "patches" => {
-            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel).with_tuning(cpu_target, hz, hugepages, performance_governor)
+            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_tuning(cpu_target, hz, hugepages, performance_governor)
+                .with_max_jobs(max_jobs)
                 .with_patches(extra_patches.clone(), patch_strict);
             let (files, dirs) = build::collect_patches(&build::bundled_patch_dirs(p.distro), &p.extra_patches);
             if json {
@@ -326,6 +338,7 @@ fn main() -> ExitCode {
             let dry = has_flag(&args, "--dry-run");
             let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
                 .with_tuning(cpu_target, hz, hugepages, performance_governor)
+                .with_max_jobs(max_jobs)
                 .with_patches(extra_patches.clone(), patch_strict);
             let result = if target_distro != host_distro && !dry {
                 container_build::run(&plan, &args, host_distro)
@@ -375,7 +388,7 @@ fn usage() -> String {
   plan   [--target-distro host|arch|debian] [--flavor F] print the selected plan
   patches [--patch P]    list every patch that will be applied, in order, for this host
   build  [--target-distro host|arch|debian] [--cpu-target auto|portable|v1|v2|v3|v4]
-         [--hz HZ] [--hugepages madvise|always] [--performance-governor]
+         [--hz HZ] [--hugepages madvise|always] [--max-jobs auto|N] [--performance-governor]
          [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
                          build a kernel package; cross-distro builds use Podman/Docker
                          --name / --rename  builds linux-<NAME> (default: arxos)
@@ -383,6 +396,7 @@ fn usage() -> String {
                          --cpu-target       auto detects local CPU level; portable is for shared packages
                          --hz HZ            tick rate: 1000, 750, 600, 500, 300, 250, or 100
                          --hugepages        madvise (default) or always
+                         --max-jobs         auto lets the planner decide; N caps jobs and is further resource-limited
                          --performance-governor opt in to the performance governor default (not recommended for most laptops)
                          --pkgrel N         package revision / custom version (default: 1)
                          --out DIR          write the finished packages to DIR
