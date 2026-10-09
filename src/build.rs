@@ -282,7 +282,7 @@ fn repair_cachyos_conditional_b2sums_text(
         return Ok(original.to_string());
     }
     for patch in &patches {
-        if !original.contains(patch) {
+        if !original.contains(*patch) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("selected CachyOS PKGBUILD does not declare expected patch {patch}; refusing to guess"),
