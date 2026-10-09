@@ -289,6 +289,11 @@ fn repair_cachyos_conditional_b2sums_text(
             ));
         }
     }
+    // Read current hashes from upstream metadata before touching existing arrays. This is also
+    // used to safely migrate a workspace where a user applied the earlier one-off BORE checksum fix.
+    let patch_sums: Vec<(&str, String)> = patches.iter()
+        .map(|patch| Ok((*patch, srcinfo_b2sum_for_patch(variant_srcinfo, patch)?)))
+        .collect::<io::Result<Vec<_>>>()?;
 
     let mut cleaned = original.to_string();
     // Migrate workspaces prepared by the earlier akt repair code.
@@ -306,11 +311,33 @@ fn repair_cachyos_conditional_b2sums_text(
         if cleaned.as_bytes().get(remove_end) == Some(&b'\n') { remove_end += 1; }
         cleaned.replace_range(remove_start..remove_end, "");
     }
-    if cleaned.contains("b2sums+=(") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "CachyOS PKGBUILD uses an unrecognized b2sums+= assignment; update the checksum synchronizer before building",
-        ));
+    while let Some(array_pos) = cleaned.find("b2sums+=(") {
+        let array_end = cleaned[array_pos..].find(')')
+            .map(|offset| array_pos + offset + 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unterminated extra CachyOS b2sums array"))?;
+        let appended_values = parse_quoted_array_values(&cleaned[array_pos..array_end]);
+        let previous_line = cleaned[..array_pos].trim_end().lines().last().unwrap_or("").trim();
+        let is_known_manual_fix = previous_line == "# Verified CachyOS BORE patch checksum";
+        let values_are_selected_patches = !appended_values.is_empty()
+            && appended_values.iter().all(|value| patch_sums.iter().any(|(_, sum)| value == sum));
+        if !values_are_selected_patches && !is_known_manual_fix {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CachyOS PKGBUILD has an unrecognized b2sums+= assignment; refusing to change source/checksum ordering",
+            ));
+        }
+        let mut remove_start = array_pos;
+        if is_known_manual_fix {
+            if let Some(line_start) = cleaned[..array_pos].rfind('\n') {
+                let comment_start = cleaned[..line_start].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                if cleaned[comment_start..line_start].trim() == previous_line {
+                    remove_start = comment_start;
+                }
+            }
+        }
+        let mut remove_end = array_end;
+        if cleaned.as_bytes().get(remove_end) == Some(&b'\n') { remove_end += 1; }
+        cleaned.replace_range(remove_start..remove_end, "");
     }
 
     let old_values = declared_b2sums_values(&cleaned).ok_or_else(|| {
@@ -330,8 +357,8 @@ fn repair_cachyos_conditional_b2sums_text(
         }
         new_values.push(old_values[3].clone());
     }
-    for patch in &patches {
-        new_values.push(srcinfo_b2sum_for_patch(variant_srcinfo, patch)?);
+    for (_, sum) in &patch_sums {
+        new_values.push(sum.clone());
     }
 
     let array_start = cleaned.find("b2sums=(").ok_or_else(|| {
@@ -974,6 +1001,24 @@ b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')
         assert_eq!(values[3], "dkms-sum");
         assert_eq!(values[4], "03b6d236610ae00db9395819aa7578860f45ce10839fbdcee80fb8e9e9c8810896d20680c63e43c416ae23b371efd737bc0a14831e1f7d8111578c1f65bda68f");
         assert_eq!(repair_cachyos_conditional_b2sums_text(&repaired, "bore", "thin", BORE_SRCINFO).unwrap(), repaired);
+    }
+
+    #[test]
+    fn cachyos_checksum_sync_tracks_changed_upstream_hash() {
+        let input = r#"
+source=("https://example.invalid/linux.tar.gz" "https://example.invalid/linux.tar.gz.asc" "config")
+source+=("${_patchsource}/misc/dkms-clang.patch")
+source+=("${_patchsource}/sched/0001-bore-cachy.patch")
+b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')
+"#;
+        let new_hash = "ab".repeat(64);
+        let newer_srcinfo = BORE_SRCINFO.replace(
+            "03b6d236610ae00db9395819aa7578860f45ce10839fbdcee80fb8e9e9c8810896d20680c63e43c416ae23b371efd737bc0a14831e1f7d8111578c1f65bda68f",
+            &new_hash,
+        );
+        let repaired = repair_cachyos_conditional_b2sums_text(&input, "bore", "thin", &newer_srcinfo).unwrap();
+        assert!(repaired.contains(&new_hash));
+        assert!(!repaired.contains("03b6d236610ae00db9395819aa7578860f45ce10839fbdcee80fb8e9e9c8810896d20680c63e43c416ae23b371efd737bc0a14831e1f7d8111578c1f65bda68f"));
     }
 
     #[test]
