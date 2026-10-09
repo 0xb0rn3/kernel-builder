@@ -101,7 +101,11 @@ fn absolute_dir(path: &Path) -> io::Result<PathBuf> {
     Ok(canonical)
 }
 fn output_path(work: &Path, plan: &Plan) -> PathBuf {
-    plan.out.as_ref().map(PathBuf::from).unwrap_or_else(|| work.to_path_buf())
+    let Some(raw) = &plan.out else { return work.to_path_buf(); };
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") { return PathBuf::from(home).join(rest); }
+    }
+    PathBuf::from(raw)
 }
 fn containerfile(target: Distro) -> &'static str {
     match target {
@@ -226,10 +230,11 @@ pub fn run(plan: &Plan, args: &[String], host: Distro) -> io::Result<()> {
     let mut run = Command::new(&runtime);
     run.args(["run", "--rm"]);
     if runtime == "podman" { run.args(["--userns=keep-id"]); }
-    run.args(["-e", "AKT_WORK=/work", "-e", "XDG_CACHE_HOME=/work/cache", "-v", &work_mount, "-v", &out_mount, "-w", "/src", &image]);
+    run.args(["-e", "AKT_WORK=/work", "-e", "XDG_CACHE_HOME=/work/cache"]);
     if let Ok(cap) = std::env::var("AKT_MAX_JOBS") {
         run.args(["-e", &format!("AKT_MAX_JOBS={cap}")]);
     }
+    run.args(["-v", &work_mount, "-v", &out_mount, "-w", "/src", &image]);
     run.args(&child[1..]);
     let status = run.status()?;
     if !status.success() {
