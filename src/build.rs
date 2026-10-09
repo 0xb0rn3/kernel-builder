@@ -241,7 +241,7 @@ fn repair_cachyos_conditional_b2sums_text(
         return Ok(original.to_string());
     }
 
-    let base_sources = 3 + usize::from(matches!(lto, "thin" | "full" | "thin-dist"));
+    let base_sources = 3 + if matches!(lto, "thin" | "full" | "thin-dist") { 1 } else { 0 };
     let expected_sources = base_sources + patches.len();
     let current_sums = declared_b2sums_count(&original).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "CachyOS PKGBUILD has no parseable b2sums array")
