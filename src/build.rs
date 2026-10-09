@@ -286,7 +286,7 @@ fn repair_cachyos_conditional_b2sums_text(
 
     let patch_sums = srcinfo_conditional_patch_sums(variant_srcinfo)?;
     for expected_path in &expected {
-        if !patch_sums.iter().any(|(path, _)| path == *expected_path) {
+        if !patch_sums.iter().any(|(path, _)| path.as_str() == *expected_path) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("matching CachyOS .SRCINFO does not include {expected_path}; refusing to guess a checksum"),
