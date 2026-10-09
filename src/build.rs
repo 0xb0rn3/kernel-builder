@@ -173,10 +173,11 @@ fn cpu_processor_opt(target: &str, work: &Path) -> io::Result<String> {
 // These hashes are copied from CachyOS's matching variant .SRCINFO files for the SAME
 // recipe commit. Keep this narrowly pinned: if the recipe or patch changes, fail closed.
 fn cachyos_conditional_patch_paths(scheduler: &str) -> Vec<&'static str> {
+    // Minimum expected entries for the currently supported flavour choices. Additional patches
+    // are discovered dynamically from the selected upstream variant's .SRCINFO below.
     match scheduler {
         "bore" => vec!["sched/0001-bore-cachy.patch"],
         "hardened" => vec!["sched/0001-bore-cachy.patch", "misc/0001-hardened.patch"],
-        "rt" => vec!["misc/0001-rt-i915.patch"],
         "rt-bore" => vec!["sched/0001-bore-cachy.patch", "misc/0001-rt-i915.patch"],
         "bmq" => vec!["sched/0001-prjc-cachy.patch"],
         _ => Vec::new(),
@@ -187,13 +188,15 @@ fn cachyos_variant_dir(scheduler: &str) -> Option<&'static str> {
     match scheduler {
         "bore" => Some("linux-cachyos-bore"),
         "hardened" => Some("linux-cachyos-hardened"),
-        "rt" | "rt-bore" => Some("linux-cachyos-rt-bore"),
+        "rt-bore" => Some("linux-cachyos-rt-bore"),
         "bmq" => Some("linux-cachyos-bmq"),
         _ => None,
     }
 }
 
-fn srcinfo_b2sum_for_patch(srcinfo: &str, patch_path: &str) -> io::Result<String> {
+/// Return every conditional CachyOS patch and its checksum in the same order as the matching
+/// upstream .SRCINFO source list. Metadata is read with git show at the recipe's exact revision.
+fn srcinfo_conditional_patch_sums(srcinfo: &str) -> io::Result<Vec<(String, String)>> {
     let sources: Vec<&str> = srcinfo.lines()
         .map(str::trim)
         .filter_map(|line| line.strip_prefix("source = "))
@@ -211,26 +214,25 @@ fn srcinfo_b2sum_for_patch(srcinfo: &str, patch_path: &str) -> io::Result<String
             ),
         ));
     }
-    let matched: Vec<&str> = sources.iter().zip(sums.iter())
-        .filter_map(|(source, sum)| source.ends_with(patch_path).then_some(*sum))
-        .collect();
-    if matched.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "CachyOS .SRCINFO must contain exactly one checksum for {patch_path}; found {}",
-                matched.len()
-            ),
-        ));
+
+    let mut patches = Vec::new();
+    for (source, sum) in sources.iter().zip(sums.iter()) {
+        // CachyOS scheduler patches are hosted in kernel-patches. The LTO-specific
+        // dkms-clang.patch is handled separately from the generic PKGBUILD's own checksum.
+        let Some((_, tail)) = source.split_once("kernel-patches/master/") else { continue };
+        let Some((_, relative)) = tail.split_once('/') else { continue }; // drop kernel major/minor
+        if !relative.ends_with(".patch") || relative == "misc/dkms-clang.patch" {
+            continue;
+        }
+        if sum.len() != 128 || !sum.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("CachyOS .SRCINFO has no valid BLAKE2 checksum for {relative}; refusing to skip integrity checks"),
+            ));
+        }
+        patches.push((relative.to_string(), sum.to_ascii_lowercase()));
     }
-    let value = matched[0];
-    if value.len() != 128 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("CachyOS .SRCINFO does not provide a valid BLAKE2 checksum for {patch_path}; refusing to skip integrity checks"),
-        ));
-    }
-    Ok(value.to_ascii_lowercase())
+    Ok(patches)
 }
 
 fn parse_quoted_array_values(array: &str) -> Vec<String> {
@@ -277,23 +279,28 @@ fn repair_cachyos_conditional_b2sums_text(
     lto: &str,
     variant_srcinfo: &str,
 ) -> io::Result<String> {
-    let patches = cachyos_conditional_patch_paths(scheduler);
-    if patches.is_empty() {
+    let expected = cachyos_conditional_patch_paths(scheduler);
+    if expected.is_empty() {
         return Ok(original.to_string());
     }
-    for patch in &patches {
-        if !original.contains(*patch) {
+
+    let patch_sums = srcinfo_conditional_patch_sums(variant_srcinfo)?;
+    for expected_path in &expected {
+        if !patch_sums.iter().any(|(path, _)| path == *expected_path) {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("selected CachyOS PKGBUILD does not declare expected patch {patch}; refusing to guess"),
+                io::ErrorKind::NotFound,
+                format!("matching CachyOS .SRCINFO does not include {expected_path}; refusing to guess a checksum"),
             ));
         }
     }
-    // Read current hashes from upstream metadata before touching existing arrays. This is also
-    // used to safely migrate a workspace where a user applied the earlier one-off BORE checksum fix.
-    let patch_sums: Vec<(&str, String)> = patches.iter()
-        .map(|patch| Ok((*patch, srcinfo_b2sum_for_patch(variant_srcinfo, patch)?)))
-        .collect::<io::Result<Vec<_>>>()?;
+    for (patch, _) in &patch_sums {
+        if !original.contains(patch.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("upstream .SRCINFO lists {patch}, but the checked-out PKGBUILD does not; refusing to change source/checksum ordering"),
+            ));
+        }
+    }
 
     let mut cleaned = original.to_string();
     // Migrate workspaces prepared by the earlier akt repair code.
@@ -311,6 +318,8 @@ fn repair_cachyos_conditional_b2sums_text(
         if cleaned.as_bytes().get(remove_end) == Some(&b'\n') { remove_end += 1; }
         cleaned.replace_range(remove_start..remove_end, "");
     }
+    // Also migrate the one-off manual repair documented for the previous release. The stale
+    // value is discarded and replaced with the current upstream metadata value, never trusted.
     while let Some(array_pos) = cleaned.find("b2sums+=(") {
         let array_end = cleaned[array_pos..].find(')')
             .map(|offset| array_pos + offset + 1)
@@ -370,7 +379,7 @@ fn repair_cachyos_conditional_b2sums_text(
     let rebuilt = format!("b2sums=({})", new_values.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(" "));
     cleaned.replace_range(array_start..array_end, &rebuilt);
 
-    let expected_count = 3 + usize::from(lto_enabled) + patches.len();
+    let expected_count = 3 + usize::from(lto_enabled) + patch_sums.len();
     if new_values.len() != expected_count {
         return Err(io::Error::new(io::ErrorKind::InvalidData,
             format!("internal checksum sync count mismatch: have {}, expected {expected_count}", new_values.len())));
