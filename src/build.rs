@@ -176,8 +176,11 @@ fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level:
     if !has(&format!("CONFIG_HZ={}", p.hz)) {
         return Err(fail(&format!("CONFIG_HZ={}", p.hz)));
     }
-    let thp = format!("CONFIG_TRANSPARENT_HUGEPAGE_{}=y", p.hugepages.to_ascii_uppercase());
-    if !has(&thp) { return Err(fail(&thp)); }
+    // PREEMPT_RT kernels depend on !TRANSPARENT_HUGEPAGE, so THP policy does not apply there.
+    if p.flavor.key != "rt" {
+        let thp = format!("CONFIG_TRANSPARENT_HUGEPAGE_{}=y", p.hugepages.to_ascii_uppercase());
+        if !has(&thp) { return Err(fail(&thp)); }
+    }
     if p.performance_governor && !has("CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y") {
         return Err(fail("CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y"));
     }
@@ -189,6 +192,18 @@ fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level:
     }
     if p.flavor.lto == "thin" && !has("CONFIG_LTO_CLANG_THIN=y") {
         return Err(fail("CONFIG_LTO_CLANG_THIN=y"));
+    }
+    if p.flavor.key == "hardened" {
+        if !has("CONFIG_CFI_CLANG=y") { return Err(fail("CONFIG_CFI_CLANG=y (hardened/kCFI profile)")); }
+        if !has("CONFIG_CFI_AUTO_DEFAULT=y") { return Err(fail("CONFIG_CFI_AUTO_DEFAULT=y (hardened/kCFI profile)")); }
+    }
+    if p.distro == Distro::Arch && matches!(p.flavor.sched, "bore" | "rt-bore" | "hardened")
+        && !has("CONFIG_SCHED_BORE=y") {
+        return Err(fail("CONFIG_SCHED_BORE=y (selected CachyOS scheduler)"));
+    }
+    if p.distro == Distro::Debian && text.contains("CONFIG_SCHED_BORE")
+        && !has("CONFIG_SCHED_BORE=y") {
+        return Err(fail("CONFIG_SCHED_BORE=y (source includes BORE support)"));
     }
     Ok(())
 }
