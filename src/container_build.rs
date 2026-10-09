@@ -234,6 +234,9 @@ pub fn run(plan: &Plan, args: &[String], host: Distro) -> io::Result<()> {
     if let Ok(cap) = std::env::var("AKT_MAX_JOBS") {
         run.args(["-e", &format!("AKT_MAX_JOBS={cap}")]);
     }
+    if let Ok(cap) = std::env::var("AKT_MAX_LTO_JOBS") {
+        run.args(["-e", &format!("AKT_MAX_LTO_JOBS={cap}")]);
+    }
     run.args(["-v", &work_mount, "-v", &out_mount, "-w", "/src", &image]);
     run.args(&child[1..]);
     let status = run.status()?;
