@@ -87,11 +87,12 @@ status, work-filesystem free space, and the resource planner's current job ceili
 is shown as unknown. Temperature is a point-in-time reading and is not predictive thermal control.
 
 The command and GUI provide a one-click **Apply recommendations** action. It chooses an initial CPU
-target from exposed CPU flags, recommends a conservative job cap, suggests fewer ThinLTO backends
-for laptop/battery operation, leaves the performance governor opt-in, and defaults THP to
-`madvise`. The suggested timer rate starts at 500 Hz when a battery device is detected and at
-1000 Hz otherwise; this is a benchmark starting point, not a claim that one rate is universally
-faster or more efficient.
+target from exposed CPU flags, recommends conservative make/ThinLTO job caps, leaves the performance
+governor opt-in, and defaults THP to `madvise`. On battery-powered machines, the GUI suggests 500 Hz
+for the CachyOS/Arch target, which supports intermediate tick rates, and 250 Hz for Debian source to
+stay with its standard Kconfig choices; on AC/no-battery detection it suggests 1000 Hz. Treat this
+as a benchmark starting point, not a claim that one rate is universally faster or more efficient.
+The build gate rejects any requested rate that does not survive the selected source's configuration.
 
 | Setting | Behavior | Trade-off / guardrail |
 |---|---|---|
