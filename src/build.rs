@@ -238,7 +238,7 @@ fn repair_cachyos_conditional_b2sums_text(
 ) -> io::Result<String> {
     let patches = cachyos_conditional_patch_sums(scheduler);
     if patches.is_empty() {
-        return Ok(());
+        return Ok(original.to_string());
     }
 
     let base_sources = 3 + usize::from(matches!(lto, "thin" | "full" | "thin-dist"));
@@ -248,7 +248,7 @@ fn repair_cachyos_conditional_b2sums_text(
     })?;
     if current_sums == expected_sources {
         // Upstream has fixed its metadata. Let makepkg verify those published checksums.
-        return Ok(());
+        return Ok(original.to_string());
     }
     if current_sums != base_sources {
         return Err(io::Error::new(
@@ -267,12 +267,12 @@ fn repair_cachyos_conditional_b2sums_text(
         .collect();
     if missing.is_empty() {
         // An earlier akt invocation already appended these exact reviewed sums.
-        return Ok(());
+        return Ok(original.to_string());
     }
 
-    let major = recipe_assignment(&original, "_major").unwrap_or("");
-    let minor = recipe_assignment(&original, "_minor").unwrap_or("");
-    let tagrel = recipe_assignment(&original, "_tagrel").unwrap_or("");
+    let major = recipe_assignment(original, "_major").unwrap_or("");
+    let minor = recipe_assignment(original, "_minor").unwrap_or("");
+    let tagrel = recipe_assignment(original, "_tagrel").unwrap_or("");
     let recipe_version = format!("{major}.{minor}-{tagrel}");
     if source_revision != CACHYOS_RECIPE_REV_7_2_9_2 || recipe_version != "7.2.9-2" {
         return Err(io::Error::new(
@@ -293,7 +293,7 @@ fn repair_cachyos_conditional_b2sums_text(
         }
     }
 
-    let mut updated = original;
+    let mut updated = original.to_string();
     updated.push_str(
         "\n# akt: checksums from the matching CachyOS 7.2.9-2 variant .SRCINFO; makepkg still verifies each patch\nb2sums+=(",
     );
@@ -895,14 +895,6 @@ _tagrel=2
 source+=("${_patchsource}/sched/0001-bore-cachy.patch")
 b2sums=('archive' 'signature' 'config' 'dkms-patch')
 "#;
-        let fixed = repair_cachyos_conditional_b2sums(
-            Path::new("/unused"),
-            "bore",
-            "thin",
-            CACHYOS_RECIPE_REV_7_2_9_2,
-        );
-        // The pure transformation is tested below; this call must fail only because the path is absent.
-        assert!(fixed.is_err());
         let repaired = repair_cachyos_conditional_b2sums_text(
             input,
             "bore",
