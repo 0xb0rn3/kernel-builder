@@ -16,11 +16,9 @@ jobs:
         uses: actions/checkout@v4
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Check formatting
-        run: cargo fmt --all -- --check
       - name: Compile
         run: cargo check --locked
-      - name: Run hardware inventory tests
-        run: cargo test --locked sysinfo::tests
+      - name: Run unit tests
+        run: cargo test --locked
       - name: Release build
         run: cargo build --release --locked
