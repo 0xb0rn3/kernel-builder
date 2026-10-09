@@ -161,6 +161,10 @@ fn kernel_name(s: &str) -> Result<String, String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+    if cmd == "build" && has_flag(&args, "--output") {
+        eprintln!("akt: '--output' is not supported; use '--out DIR' to select the package output directory");
+        return ExitCode::FAILURE;
+    }
     let json = has_flag(&args, "--json");
     let fl = flavor(flag(&args, "--flavor").unwrap_or("default")).unwrap_or(&FLAVORS[0]);
     let kname = match kernel_name(flag(&args, "--name").or_else(|| flag(&args, "--rename")).unwrap_or("arxos")) {

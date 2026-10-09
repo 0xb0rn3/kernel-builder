@@ -3,7 +3,7 @@
 // ARXOS delta before the multi-hour compile, so a stripped option aborts here, not after hours.
 use crate::{data_dir, gate, resources, Distro, Plan};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // Shell snippets that tidy the output dir after a build: keep only the version just built and move
@@ -112,14 +112,37 @@ fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
     Ok(BuildLock(f))
 }
 
+/// Resolve a user-writable build workspace separately from the root-owned installed data.
+/// AKT_WORK remains the explicit override; otherwise use the user's XDG cache (or ~/.cache).
+fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
+    if let Some(work) = std::env::var_os("AKT_WORK").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(work));
+    }
+    let cache_root = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|home| home.join(".cache"))
+        })
+        .ok_or_else(|| io::Error::new(
+            io::ErrorKind::NotFound,
+            "cannot determine a cache directory; set AKT_WORK or HOME/XDG_CACHE_HOME",
+        ))?;
+    Ok(cache_root.join("akt").join("build")
+        .join(format!("{}-{flavor}", distro.name())))
+}
+
 pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
     if plan.distro == Distro::Unknown {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported host (need Arch- or Debian-family)"));
     }
     print_plan(&plan);
     if dry {
-        let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/{}-{}", data_dir().display(), plan.distro.name(), plan.flavor.key));
-        resources::detect(Path::new(&work))?.report();
+        let work = work_dir(plan.distro, plan.flavor.key)?;
+        resources::detect(&work)?.report();
         println!("[dry-run] no build performed. Re-run without --dry-run to build.");
         return Ok(());
     }
@@ -132,7 +155,7 @@ pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
 
 fn build_arch(p: &Plan) -> io::Result<()> {
     let dd = data_dir();
-    let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/arch-{}", dd.display(), p.flavor.key));
+    let work = work_dir(Distro::Arch, p.flavor.key)?.display().to_string();
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
     let _lock = acquire_build_lock(workp)?;   // cross-process (CLI+GUI) lock; held until this returns
@@ -268,8 +291,7 @@ pub fn rollback(p: &Plan) -> io::Result<()> {
     if p.distro != Distro::Arch {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "akt rollback currently supports the Arch path only"));
     }
-    let dd = data_dir();
-    let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/arch-{}", dd.display(), p.flavor.key));
+    let work = work_dir(Distro::Arch, p.flavor.key)?.display().to_string();
     let prev = Path::new(&work).join("cos/linux-cachyos/prev");
     let kpkg = format!("linux-{}", p.kname);
     let hpkg = format!("linux-{}-headers", p.kname);
@@ -334,7 +356,7 @@ pub fn rollback(p: &Plan) -> io::Result<()> {
 
 fn build_debian(p: &Plan) -> io::Result<()> {
     let dd = data_dir();
-    let work = std::env::var("AKT_WORK").unwrap_or_else(|_| format!("{}/build/debian-{}", dd.display(), p.flavor.key));
+    let work = work_dir(Distro::Debian, p.flavor.key)?.display().to_string();
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
     let _lock = acquire_build_lock(workp)?;   // cross-process (CLI+GUI) lock; held until this returns

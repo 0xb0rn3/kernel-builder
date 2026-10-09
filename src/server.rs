@@ -185,6 +185,47 @@ fn read_line_deadline(r: &mut BufReader<TcpStream>, s: &TcpStream, deadline: Ins
     }
 }
 
+/// Decode one application/x-www-form-urlencoded query component.
+fn decode_query_component(raw: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                decoded.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        decoded.push((hi << 4) | lo);
+                        i += 3;
+                    }
+                    _ => {
+                        decoded.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                decoded.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -> std::io::Result<()> {
     s.set_read_timeout(Some(READ_TIMEOUT))?;
     s.set_write_timeout(Some(READ_TIMEOUT))?;
@@ -245,7 +286,11 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
 
     let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
     let q = |k: &str| -> Option<String> {
-        query.split('&').find_map(|kv| kv.split_once('=').filter(|(a, _)| *a == k).map(|(_, v)| v.to_string()))
+        query.split('&').find_map(|kv| {
+            kv.split_once('=')
+                .filter(|(a, _)| *a == k)
+                .map(|(_, v)| decode_query_component(v))
+        })
     };
 
     match (method.as_str(), path) {
@@ -319,3 +364,23 @@ fn respond(s: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) -> std::io
     s.flush()
 }
 fn json(s: &mut TcpStream, body: &str) -> std::io::Result<()> { respond(s, "200 OK", "application/json", body.as_bytes()) }
+
+#[cfg(test)]
+mod query_decode_tests {
+    use super::decode_query_component;
+
+    #[test]
+    fn decodes_encoded_output_paths() {
+        assert_eq!(
+            decode_query_component("%2Fhome%2Foxbv1%2FDesktop%2F"),
+            "/home/oxbv1/Desktop/"
+        );
+        assert_eq!(decode_query_component("%2Ftmp%2Fbuild%20dir"), "/tmp/build dir");
+    }
+
+    #[test]
+    fn handles_plus_and_malformed_escapes() {
+        assert_eq!(decode_query_component("hello+world"), "hello world");
+        assert_eq!(decode_query_component("%ZZ"), "%ZZ");
+    }
+}
