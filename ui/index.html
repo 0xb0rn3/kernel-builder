@@ -365,7 +365,9 @@ $('#refreshSystem').addEventListener('click',loadSystem);
 $('#applyRecommended').addEventListener('click',()=>{
   if(!lastSystemInfo){ $('#systemState').textContent='Hardware inventory unavailable; refresh hardware before applying recommendations.'; return; }
   cpuTarget=lastSystemInfo.recommended_cpu_target||'portable';
-  hz=lastSystemInfo.battery_percent!==null ? '500' : '1000';
+  const effectiveTarget=target==='host'?hostDistro:target;
+  // CachyOS supports additional intermediate HZ rates; Debian source usually exposes the standard Kconfig choices.
+  hz=lastSystemInfo.battery_percent!==null ? (effectiveTarget==='arch'?'500':'250') : '1000';
   hugepages='madvise';
   performanceGovernor=false;
   maxJobs=lastSystemInfo.recommended_max_jobs===null ? 'auto' : String(lastSystemInfo.recommended_max_jobs);
