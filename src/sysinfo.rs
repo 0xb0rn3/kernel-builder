@@ -249,6 +249,21 @@ impl SystemInfo {
     pub fn recommended_cpu_target(&self) -> String {
         if self.x86_level == 0 { "portable".to_string() } else { format!("v{}", self.x86_level) }
     }
+    /// Conservative *starting cap*, not a hardware safety certification.
+    /// The resource planner's hard cap is still enforced independently during a build.
+    pub fn recommended_max_jobs(&self) -> Option<usize> {
+        let planner_cap = self.resource_jobs?;
+        let cpu_temp = self.temperatures.iter()
+            .filter(|(kind, _, _)| {
+                let k = kind.to_ascii_lowercase();
+                k.contains("cpu") || k.contains("pkg") || k.contains("x86") || k.contains("core")
+            })
+            .map(|(_, temp, critical)| critical.map(|c| *temp >= c - 10.0).unwrap_or(*temp >= 90.0))
+            .any(|hot| hot);
+        if cpu_temp { Some(planner_cap.min(2).max(1)) }
+        else if self.battery_percent.is_some() { Some(planner_cap.min(4).max(1)) }
+        else { Some(planner_cap) }
+    }
     pub fn recommendations(&self) -> Vec<String> {
         let mut v = Vec::new();
         let target = self.recommended_cpu_target();
@@ -265,9 +280,10 @@ impl SystemInfo {
         } else {
             v.push("No battery device was detected; 1000 Hz is a reasonable responsiveness baseline, but compare latency and throughput against lower tick rates before claiming a win.".to_string());
         }
-        match (self.resource_jobs, self.thinlto_jobs) {
-            (Some(jobs), Some(link_jobs)) => v.push(format!("The resource planner currently allows up to {jobs} make jobs and {link_jobs} ThinLTO backends from visible CPU/RAM/cgroup/disk limits. This is a build-resource ceiling, not a thermal guarantee; on a laptop, cap jobs lower if sustained temperatures rise.")),
-            _ => v.push("The resource planner could not determine a safe job ceiling from the visible cgroup/memory/disk data. Review cgroup v2 visibility and available build disk before starting compilation.".to_string()),
+        match (self.resource_jobs, self.thinlto_jobs, self.recommended_max_jobs()) {
+            (Some(jobs), Some(link_jobs), Some(recommended)) => v.push(format!("Resource planner cap: {jobs} make jobs and {link_jobs} ThinLTO backends. Conservative suggested maximum: {recommended} make jobs{}; these are build-resource estimates, not a thermal or hardware safety guarantee.",
+                if recommended < jobs { " (lower than the planner ceiling because this looks like a laptop or current CPU temperature is elevated)" } else { "" })),
+            _ => v.push("The resource planner could not determine a recommended job cap from visible cgroup/memory/disk data. Review cgroup v2 visibility and free workspace space before building.".to_string()),
         }
         if self.logical_cpus < 4 || self.ram_total_mib.unwrap_or(0) < 8192 {
             v.push("Conservative build ceiling: start with AKT_MAX_JOBS=2 to preserve memory and desktop responsiveness.".to_string());
@@ -302,7 +318,7 @@ impl SystemInfo {
         let gpus = self.gpus.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
         let recs = self.recommendations().iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
         format!(
-            "{{\"os_id\":{},\"os_like\":{},\"os_pretty\":{},\"arch\":{},\"machine\":{},\"cpu_vendor\":{},\"cpu_model\":{},\"logical_cpus\":{},\"physical_cores\":{},\"x86_64_level\":{},\"x86_64_level_label\":{},\"recommended_cpu_target\":{},\"ram_total_mib\":{},\"ram_available_mib\":{},\"swap_total_mib\":{},\"cpu_max_mhz\":{},\"cpu_governor\":{},\"cpu_driver\":{},\"temperatures\":[{}],\"gpus\":[{}],\"battery_percent\":{},\"battery_status\":{},\"ac_online\":{},\"work_free_gib\":{},\"resource_jobs\":{},\"thinlto_jobs\":{},\"recommendations\":[{}]}}",
+            "{{\"os_id\":{},\"os_like\":{},\"os_pretty\":{},\"arch\":{},\"machine\":{},\"cpu_vendor\":{},\"cpu_model\":{},\"logical_cpus\":{},\"physical_cores\":{},\"x86_64_level\":{},\"x86_64_level_label\":{},\"recommended_cpu_target\":{},\"ram_total_mib\":{},\"ram_available_mib\":{},\"swap_total_mib\":{},\"cpu_max_mhz\":{},\"cpu_governor\":{},\"cpu_driver\":{},\"temperatures\":[{}],\"gpus\":[{}],\"battery_percent\":{},\"battery_status\":{},\"ac_online\":{},\"work_free_gib\":{},\"resource_jobs\":{},\"thinlto_jobs\":{},\"recommended_max_jobs\":{},\"recommendations\":[{}]}}",
             json_str(&self.os_id), json_str(&self.os_like), json_str(&self.os_pretty), json_str(&self.arch), json_str(&self.machine),
             json_str(&self.cpu_vendor), json_str(&self.cpu_model), self.logical_cpus,
             self.physical_cores.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), self.x86_level,
@@ -318,7 +334,8 @@ impl SystemInfo {
             self.ac_online.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
             self.work_free_gib.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
             self.resource_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
-            self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), recs)
+            self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+            self.recommended_max_jobs().map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), recs)
     }
     pub fn report(&self) {
         println!("== hardware detected ==");
@@ -331,7 +348,10 @@ impl SystemInfo {
         println!("  swap       : {} MiB", self.swap_total_mib.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
         println!("  CPU policy : governor={} driver={} max-frequency={} MHz", self.cpu_governor.as_deref().unwrap_or("unknown"), self.cpu_driver.as_deref().unwrap_or("unknown"), self.cpu_max_mhz.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
         println!("  work disk  : {} GiB free", self.work_free_gib.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
-        println!("  job ceiling: make={} ThinLTO={}", self.resource_jobs.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()), self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
+        println!("  job ceiling: make={} ThinLTO={} (suggested starting cap: {})",
+            self.resource_jobs.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()),
+            self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()),
+            self.recommended_max_jobs().map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()));
         for (kind, c, critical) in &self.temperatures {
             println!("  thermal    : {kind} {c:.1}°C{}", critical.map(|v| format!(" (critical {v:.1}°C)")).unwrap_or_default());
         }
