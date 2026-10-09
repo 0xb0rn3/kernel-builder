@@ -81,7 +81,18 @@ pub fn detect(work: &Path) -> io::Result<Resources> {
         Err(env::VarError::NotPresent) => None,
         Err(_) => return Err(invalid("invalid AKT_MAX_JOBS")),
     };
-    calculate(cpus, available, disk, cap)
+    let mut plan = calculate(cpus, available, disk, cap)?;
+    let lto_cap = match env::var("AKT_MAX_LTO_JOBS") {
+        Ok(raw) => {
+            let n = raw.parse::<usize>().map_err(|_| invalid("AKT_MAX_LTO_JOBS must be a positive integer"))?;
+            if n == 0 { return Err(invalid("AKT_MAX_LTO_JOBS must be a positive integer")); }
+            Some(n)
+        }
+        Err(env::VarError::NotPresent) => None,
+        Err(_) => return Err(invalid("invalid AKT_MAX_LTO_JOBS")),
+    };
+    plan.link_jobs = plan.jobs.min(4).min(lto_cap.unwrap_or(usize::MAX));
+    Ok(plan)
 }
 
 impl Resources {

@@ -11,6 +11,8 @@ mod explain;
 mod gate;
 mod server;
 mod resources;
+mod sysinfo;
+mod container_build;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,14 +24,23 @@ pub enum Distro { Arch, Debian, Unknown }
 
 impl Distro {
     pub fn detect() -> Distro {
-        let os = std::fs::read_to_string("/etc/os-release").unwrap_or_default().to_lowercase();
-        let has = |k: &str| os.contains(k);
-        if has("arxos") || has("id=arch") || has("cachyos") || has("id_like=arch") || has("arch linux") { Distro::Arch }
-        else if has("id=debian") || has("id=ubuntu") || has("id=kali") || has("id_like=debian") { Distro::Debian }
+        let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let mut id = String::new();
+        let mut like = String::new();
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("ID=") { id = v.trim_matches('"').to_ascii_lowercase(); }
+            if let Some(v) = line.strip_prefix("ID_LIKE=") { like = v.trim_matches('"').to_ascii_lowercase(); }
+        }
+        let ids: Vec<&str> = std::iter::once(id.as_str()).chain(like.split_whitespace()).collect();
+        if ids.iter().any(|v| matches!(*v, "arxos" | "arch" | "cachyos")) { Distro::Arch }
+        else if ids.iter().any(|v| matches!(*v, "debian" | "ubuntu" | "kali")) { Distro::Debian }
         else { Distro::Unknown }
     }
     pub fn name(&self) -> &'static str {
         match self { Distro::Arch => "arch", Distro::Debian => "debian", Distro::Unknown => "unknown" }
+    }
+    pub fn parse_target(s: &str, host: Distro) -> Option<Distro> {
+        match s { "host" | "auto" => Some(host), "arch" => Some(Distro::Arch), "debian" => Some(Distro::Debian), _ => None }
     }
 }
 
@@ -60,6 +71,13 @@ pub struct Plan {
     pub kname: String,         // kernel name -> linux-<kname> (default "arxos"; set with --name / --rename)
     pub out: Option<String>,   // output dir for the finished packages (default: the build dir); --out
     pub pkgrel: String,        // package revision / custom version (default "1"); --pkgrel
+    pub cpu_target: String,    // auto, portable, v1..v4
+    pub hz: String,            // scheduler tick rate; verified against chosen source config
+    pub hugepages: String,     // madvise or always
+    pub performance_governor: bool, // opt-in; off by default for laptops
+    pub max_jobs: Option<usize>, // optional cap, further clamped by resource planner
+    pub thinlto_jobs: Option<usize>, // optional independent ThinLTO backend cap
+    pub source_ref: Option<String>, // pinned CachyOS recipe ref for Arch builds
     pub base: String,          // upstream base we fork/patch
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
@@ -77,10 +95,11 @@ impl Plan {
             Distro::Arch => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "CachyOS linux-cachyos (rolling latest)".into(),
                 tunes: vec![
-                    format!("CachyOS env knobs: _cpusched={}, _use_llvm_lto={}, BBRv3, 1000Hz, x86-64-v3, THP", fl.sched, fl.lto),
+                    format!("CachyOS knobs: scheduler={}, LTO={}, CPU target=auto, HZ=1000, THP=madvise, performance governor=off", fl.sched, fl.lto),
                 ],
                 overlays: vec![arxos_frag],
                 patch_sets: vec![dd.join("patches/arxos").display().to_string()],
@@ -89,11 +108,12 @@ impl Plan {
             Distro::Debian => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "Debian kernel source (apt source / linux-source)".into(),
                 tunes: vec![
-                    "CachyOS tunes ported to a Kconfig fragment: BORE (or EEVDF), BBRv3, 1000Hz, full preempt, MGLRU, THP".into(),
-                    format!("scheduler={}, lto={}", fl.sched, fl.lto),
+                    "Debian source: requested Kconfig options will be checked; BORE/BBRv3 are not assumed without their patches".into(),
+                    format!("scheduler profile={}, LTO profile={}", fl.sched, fl.lto),
                 ],
                 overlays: vec![arxos_frag],
                 patch_sets: vec![
@@ -105,11 +125,61 @@ impl Plan {
             Distro::Unknown => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "unknown host".into(), tunes: vec![], overlays: vec![], patch_sets: vec![],
                 output: "unsupported — akt supports Arch-family and Debian-family hosts".into(),
             },
         }
+    }
+    /// Resolve hardware-aware tuning options shared by CLI, GUI and builder.
+    pub fn with_tuning(mut self, cpu_target: &str, hz: &str, hugepages: &str, performance_governor: bool) -> Plan {
+        self.cpu_target = cpu_target.to_string();
+        self.hz = hz.to_string();
+        self.hugepages = hugepages.to_string();
+        self.performance_governor = performance_governor;
+        if !self.tunes.is_empty() {
+            let target = if cpu_target == "auto" {
+                crate::sysinfo::SystemInfo::detect(std::path::Path::new(".")).recommended_cpu_target()
+            } else if cpu_target == "portable" { "v1".to_string() } else { cpu_target.to_string() };
+            let sched = self.flavor.sched;
+            let lto = self.flavor.lto;
+            let hz = self.hz.clone();
+            let hugepages = self.hugepages.clone();
+            let pgov = if self.performance_governor { "on (opt-in)" } else { "off" };
+            let line = match self.distro {
+                Distro::Arch => format!("CachyOS knobs: scheduler={sched}, LTO={lto}, CPU baseline={target}, HZ={hz}, THP={hugepages}, performance governor={pgov}"),
+                Distro::Debian => format!("Debian Kconfig: CPU target={target}, HZ={hz}, THP={hugepages}, performance governor={pgov}; unavailable options must fail verification"),
+                Distro::Unknown => String::new(),
+            };
+            self.tunes[0] = line;
+        }
+        self
+    }
+    /// Attach an optional user job cap; the resource planner still clamps it to detected limits.
+    pub fn with_max_jobs(mut self, cap: Option<usize>) -> Plan {
+        self.max_jobs = cap;
+        if let Some(first) = self.tunes.first_mut() {
+            let cap_label = cap.map(|v| v.to_string()).unwrap_or_else(|| "automatic".into());
+            first.push_str(&format!(", requested max build jobs={cap_label}"));
+        }
+        self
+    }
+    pub fn with_thinlto_jobs(mut self, cap: Option<usize>) -> Plan {
+        self.thinlto_jobs = cap;
+        if let Some(first) = self.tunes.first_mut() {
+            let label = cap.map(|v| v.to_string()).unwrap_or_else(|| "automatic".into());
+            first.push_str(&format!(", requested ThinLTO jobs={label}"));
+        }
+        self
+    }
+    pub fn with_source_ref(mut self, source_ref: Option<String>) -> Plan {
+        self.source_ref = source_ref;
+        if let Some(first) = self.tunes.first_mut() {
+            let label = self.source_ref.as_deref().unwrap_or("rolling");
+            first.push_str(&format!(", source ref={label}"));
+        }
+        self
     }
     /// Attach user-supplied patches (from --patch) and the apply mode (strict = fail-fast).
     pub fn with_patches(mut self, extra: Vec<String>, strict: bool) -> Plan {
@@ -123,8 +193,12 @@ impl Plan {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
-            self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")), json_escape(&self.base),
+            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"max_jobs\":{},\"thinlto_jobs\":{},\"source_ref\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
+            self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")),
+            json_escape(&self.cpu_target), json_escape(&self.hz), json_escape(&self.hugepages), self.performance_governor,
+            self.max_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+            self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+            json_escape(self.source_ref.as_deref().unwrap_or("")), json_escape(&self.base),
             arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), arr(&self.extra_patches), self.patch_strict, json_escape(&self.output))
     }
 }
@@ -165,6 +239,58 @@ fn main() -> ExitCode {
         eprintln!("akt: '--output' is not supported; use '--out DIR' to select the package output directory");
         return ExitCode::FAILURE;
     }
+    let host_distro = Distro::detect();
+    let target_distro = match flag(&args, "--target-distro") {
+        Some(raw) => match Distro::parse_target(raw, host_distro) {
+            Some(d) => d,
+            None => { eprintln!("akt: --target-distro must be host, arch, or debian"); return ExitCode::FAILURE; }
+        },
+        None => host_distro,
+    };
+    let cpu_target = flag(&args, "--cpu-target").unwrap_or("auto");
+    if !matches!(cpu_target, "auto" | "portable" | "v1" | "v2" | "v3" | "v4") {
+        eprintln!("akt: --cpu-target must be auto, portable, v1, v2, v3, or v4"); return ExitCode::FAILURE;
+    }
+    let hz = flag(&args, "--hz").unwrap_or("1000");
+    if !matches!(hz, "1000" | "750" | "600" | "500" | "300" | "250" | "100") {
+        eprintln!("akt: --hz must be one of 1000, 750, 600, 500, 300, 250, or 100"); return ExitCode::FAILURE;
+    }
+    let hugepages = flag(&args, "--hugepages").unwrap_or("madvise");
+    if !matches!(hugepages, "madvise" | "always") {
+        eprintln!("akt: --hugepages must be madvise or always"); return ExitCode::FAILURE;
+    }
+    let performance_governor = has_flag(&args, "--performance-governor");
+    let max_jobs = match flag(&args, "--max-jobs") {
+        Some("auto") => { std::env::remove_var("AKT_MAX_JOBS"); None }
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if n > 0 => { std::env::set_var("AKT_MAX_JOBS", n.to_string()); Some(n) }
+            _ => { eprintln!("akt: --max-jobs must be auto or a positive integer"); return ExitCode::FAILURE; }
+        },
+        None => std::env::var("AKT_MAX_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0),
+    };
+    let thinlto_jobs = match flag(&args, "--thinlto-jobs") {
+        Some("auto") => { std::env::remove_var("AKT_MAX_LTO_JOBS"); None }
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if n > 0 => { std::env::set_var("AKT_MAX_LTO_JOBS", n.to_string()); Some(n) }
+            _ => { eprintln!("akt: --thinlto-jobs must be auto or a positive integer"); return ExitCode::FAILURE; }
+        },
+        None => std::env::var("AKT_MAX_LTO_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0),
+    };
+    let source_ref = flag(&args, "--source-ref").map(str::to_string);
+    if let Some(ref_name) = &source_ref {
+        let valid = !ref_name.is_empty() && ref_name.len() <= 200
+            && ref_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+            && !ref_name.starts_with('-') && !ref_name.starts_with('/') && !ref_name.ends_with('/')
+            && !ref_name.contains("..") && !ref_name.contains("//");
+        if !valid {
+            eprintln!("akt: --source-ref must be a tag, branch, or commit reference using letters, digits, '.', '_', '-', and '/'");
+            return ExitCode::FAILURE;
+        }
+        if target_distro != Distro::Arch {
+            eprintln!("akt: --source-ref applies to the Arch/CachyOS recipe; Debian chooses its source package version");
+            return ExitCode::FAILURE;
+        }
+    }
     let json = has_flag(&args, "--json");
     let fl = flavor(flag(&args, "--flavor").unwrap_or("default")).unwrap_or(&FLAVORS[0]);
     let kname = match kernel_name(flag(&args, "--name").or_else(|| flag(&args, "--rename")).unwrap_or("arxos")) {
@@ -201,7 +327,11 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "plan" => {
-            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_tuning(cpu_target, hz, hugepages, performance_governor)
+                .with_max_jobs(max_jobs)
+                .with_thinlto_jobs(thinlto_jobs)
+                .with_source_ref(source_ref.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             if json { println!("{}", p.to_json()); }
             else {
@@ -217,7 +347,11 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "patches" => {
-            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_tuning(cpu_target, hz, hugepages, performance_governor)
+                .with_max_jobs(max_jobs)
+                .with_thinlto_jobs(thinlto_jobs)
+                .with_source_ref(source_ref.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             let (files, dirs) = build::collect_patches(&build::bundled_patch_dirs(p.distro), &p.extra_patches);
             if json {
@@ -238,20 +372,39 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "explain" => {
-            explain::print(Distro::detect(), fl, &kname, json);
+            explain::print(target_distro, fl, &kname, json);
+            ExitCode::SUCCESS
+        }
+        "system" | "recommend" => {
+            let work = build::work_dir(host_distro, "default").unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let info = sysinfo::SystemInfo::detect(&work);
+            if json { println!("{}", info.to_json()); } else { info.report(); }
             ExitCode::SUCCESS
         }
         "build" => {
             let dry = has_flag(&args, "--dry-run");
-            let plan = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_tuning(cpu_target, hz, hugepages, performance_governor)
+                .with_max_jobs(max_jobs)
+                .with_thinlto_jobs(thinlto_jobs)
+                .with_source_ref(source_ref.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
-            match build::run(plan, dry) {
+            let result = if target_distro != host_distro && !dry {
+                container_build::run(&plan, &args, host_distro)
+            } else {
+                build::run(plan, dry)
+            };
+            match result {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: build failed: {e}"); ExitCode::FAILURE }
             }
         }
         "rollback" => {
-            let plan = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel);
+            if target_distro != host_distro {
+                eprintln!("akt: rollback operates on host-installed packages; do not set --target-distro for rollback");
+                return ExitCode::FAILURE;
+            }
+            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel);
             match build::rollback(&plan) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: rollback failed: {e}"); ExitCode::FAILURE }
@@ -278,13 +431,25 @@ fn usage() -> String {
     format!(
 "akt {VERSION} — ARXOS Kernel Tuner
 
-  detect                 show the host distro + which build path applies
+  detect                 show the host distro + which native build path applies
+  system [--json]        detect hardware and show build recommendations
   resources [--json]      inspect build CPU, RAM and disk limits (AKT_WORK path)
-  plan   [--flavor F]    print the tune plan (base, tunes, patches) without building
+  plan   [--target-distro host|arch|debian] [--flavor F] print the selected plan
   patches [--patch P]    list every patch that will be applied, in order, for this host
-  build  [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
-                         build a tuned kernel for this host
+  build  [--target-distro host|arch|debian] [--cpu-target auto|portable|v1|v2|v3|v4]
+         [--hz HZ] [--hugepages madvise|always] [--max-jobs auto|N]
+         [--thinlto-jobs auto|N] [--source-ref REF] [--performance-governor]
+         [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
+                         build a kernel package; cross-distro builds use Podman/Docker
                          --name / --rename  builds linux-<NAME> (default: arxos)
+                         --target-distro    host (default), arch, or debian; cross-target needs Podman/Docker
+                         --cpu-target       auto detects local CPU level; portable is for shared packages
+                         --hz HZ            tick rate: 1000, 750, 600, 500, 300, 250, or 100
+                         --hugepages        madvise (default) or always
+                         --max-jobs         auto lets the planner decide; N caps jobs and is further resource-limited
+                         --thinlto-jobs     auto or independent ThinLTO link-backend cap
+                         --source-ref       pin the Arch/CachyOS recipe to a tag, branch, or commit; default tracks rolling source
+                         --performance-governor opt in to the performance governor default (not recommended for most laptops)
                          --pkgrel N         package revision / custom version (default: 1)
                          --out DIR          write the finished packages to DIR
                          --patch P          extra patch to apply (a .patch/.diff file OR a

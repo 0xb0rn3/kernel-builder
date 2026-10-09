@@ -114,7 +114,7 @@ fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
 
 /// Resolve a user-writable build workspace separately from the root-owned installed data.
 /// AKT_WORK remains the explicit override; otherwise use the user's XDG cache (or ~/.cache).
-fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
+pub fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
     if let Some(work) = std::env::var_os("AKT_WORK").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(work));
     }
@@ -153,6 +153,61 @@ pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
     }
 }
 
+fn cpu_target_level(target: &str, work: &Path) -> io::Result<u8> {
+    let level = if target == "auto" {
+        crate::sysinfo::SystemInfo::detect(work).x86_level.max(1)
+    } else if target == "portable" || target == "v1" { 1 }
+    else { target.strip_prefix('v').and_then(|v| v.parse::<u8>().ok()).unwrap_or(1) };
+    if !(1..=4).contains(&level) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "CPU target must resolve to x86-64-v1 through v4"));
+    }
+    Ok(level)
+}
+
+fn cpu_processor_opt(target: &str, work: &Path) -> io::Result<String> {
+    Ok(format!("GENERIC_V{}", cpu_target_level(target, work)?))
+}
+
+fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level: bool) -> io::Result<()> {
+    let text = std::fs::read_to_string(config)?;
+    let has = |line: &str| text.lines().any(|v| v.trim() == line);
+    let fail = |what: &str| io::Error::new(io::ErrorKind::InvalidData,
+        format!("requested tune did not survive Kconfig resolution: {what}; refusing to compile"));
+    if !has(&format!("CONFIG_HZ={}", p.hz)) {
+        return Err(fail(&format!("CONFIG_HZ={}", p.hz)));
+    }
+    // PREEMPT_RT kernels depend on !TRANSPARENT_HUGEPAGE, so THP policy does not apply there.
+    if p.flavor.key != "rt" {
+        let thp = format!("CONFIG_TRANSPARENT_HUGEPAGE_{}=y", p.hugepages.to_ascii_uppercase());
+        if !has(&thp) { return Err(fail(&thp)); }
+    }
+    if p.performance_governor && !has("CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y") {
+        return Err(fail("CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y"));
+    }
+    if check_cpu_level && !has(&format!("CONFIG_X86_64_VERSION={cpu_level}")) {
+        return Err(fail(&format!("CONFIG_X86_64_VERSION={cpu_level}")));
+    }
+    if p.flavor.key == "rt" && !has("CONFIG_PREEMPT_RT=y") {
+        return Err(fail("CONFIG_PREEMPT_RT=y"));
+    }
+    if p.flavor.lto == "thin" && !has("CONFIG_LTO_CLANG_THIN=y") {
+        return Err(fail("CONFIG_LTO_CLANG_THIN=y"));
+    }
+    if p.flavor.key == "hardened" {
+        if !has("CONFIG_CFI_CLANG=y") { return Err(fail("CONFIG_CFI_CLANG=y (hardened/kCFI profile)")); }
+        if !has("CONFIG_CFI_AUTO_DEFAULT=y") { return Err(fail("CONFIG_CFI_AUTO_DEFAULT=y (hardened/kCFI profile)")); }
+    }
+    if p.distro == Distro::Arch && matches!(p.flavor.sched, "bore" | "rt-bore" | "hardened")
+        && !has("CONFIG_SCHED_BORE=y") {
+        return Err(fail("CONFIG_SCHED_BORE=y (selected CachyOS scheduler)"));
+    }
+    if p.distro == Distro::Debian && text.contains("CONFIG_SCHED_BORE")
+        && !has("CONFIG_SCHED_BORE=y") {
+        return Err(fail("CONFIG_SCHED_BORE=y (source includes BORE support)"));
+    }
+    Ok(())
+}
+
 fn build_arch(p: &Plan) -> io::Result<()> {
     let dd = data_dir();
     let work = work_dir(Distro::Arch, p.flavor.key)?.display().to_string();
@@ -164,15 +219,29 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     initial.report();
     let jobs = initial.jobs.to_string();
 
-    // 1. fetch the CachyOS recipe (rolling latest).
-    step("[1/5] fetch CachyOS linux-cachyos", workp, &[],
-        "if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; \
-         else git -C cos pull -q || true; fi")?;
+    // 1. fetch the CachyOS recipe. A specified source ref is checked out detached and never pulled forward.
+    let requested_ref = p.source_ref.as_deref().unwrap_or("");
+    step("[1/5] fetch CachyOS linux-cachyos", workp, &[("ARXOS_SOURCE_REF", requested_ref)],
+        "set -e; if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; fi; \
+         if [ -n \"$ARXOS_SOURCE_REF\" ]; then \
+           git -C cos fetch -q --tags origin \"$ARXOS_SOURCE_REF\"; \
+           git -C cos checkout -q --detach FETCH_HEAD; \
+         else git -C cos pull -q --ff-only || true; fi")?;
 
     let base = format!("{work}/cos/linux-cachyos");
     let basep = Path::new(&base);
+    let revision = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(basep).output()?;
+    if !revision.status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "cannot identify the CachyOS recipe revision"));
+    }
+    println!("source revision: {}", String::from_utf8_lossy(&revision.stdout).trim());
+    println!("source selection: {}", if p.source_ref.is_some() { p.source_ref.as_deref().unwrap_or("pinned") } else { "rolling latest" });
+    let cpu_opt = cpu_processor_opt(&p.cpu_target, workp)?;
+    let pgov = if p.performance_governor { "yes" } else { "no" };
+    let kcfi = if p.flavor.key == "hardened" { "yes" } else { "no" };
     let env = [
-        ("_HZ_ticks", "1000"), ("_tcp_bbr3", "yes"), ("_processor_opt", "GENERIC_V3"),
+        ("_HZ_ticks", p.hz.as_str()), ("_tcp_bbr3", "yes"), ("_processor_opt", cpu_opt.as_str()),
+        ("_hugepage", p.hugepages.as_str()), ("_per_gov", pgov), ("_use_kcfi", kcfi),
         ("_cpusched", p.flavor.sched), ("_use_llvm_lto", p.flavor.lto), ("_preempt", "full"),
         ("_build_zfs", "no"), ("_build_nvidia_open", "no"), ("_cachy_config", "yes"),
         ("PACKAGER", "ARXOS <team@arxos.uk>"), ("ARXOS_PKGREL", p.pkgrel.as_str()), ("KNAME", p.kname.as_str()),
@@ -211,6 +280,12 @@ fn build_arch(p: &Plan) -> io::Result<()> {
            --enable LIVEPATCH; make LLVM=1 olddefconfig")?;
     if !gate::verify(&format!("{kdir}/.config"), false) {
         return Err(io::Error::new(io::ErrorKind::Other, "ARXOS hardening delta missing after config — aborting before compile"));
+    }
+    let selected_level = cpu_target_level(&p.cpu_target, workp)?;
+    verify_tuning_config(Path::new(&format!("{kdir}/.config")), p, selected_level, true)?;
+    let detected_level = crate::sysinfo::SystemInfo::detect(workp).x86_level;
+    if selected_level > detected_level && p.cpu_target != "portable" {
+        eprintln!("WARNING: requested x86-64-v{selected_level} exceeds locally detected baseline v{detected_level}; the kernel may not boot on this machine.");
     }
 
     // 5. build (-f overwrites a stale same-version pkg from a prior, e.g. wrong-config, build).
@@ -257,8 +332,11 @@ fn pkg_identity(pkg: &Path) -> Option<(String, String)> {
 /// install the wrong kernel. Never falls back to a byte compare.
 fn vercmp(a: &str, b: &str) -> io::Result<std::cmp::Ordering> {
     use std::cmp::Ordering;
-    let out = Command::new("vercmp").arg(a).arg(b).output()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("vercmp unavailable (pacman not installed?): {e}")))?;
+    let out = match Command::new("vercmp").arg(a).arg(b).output() {
+        Ok(out) => out,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(fallback_vercmp(a, b)),
+        Err(e) => return Err(io::Error::new(io::ErrorKind::Other, format!("could not run vercmp: {e}"))),
+    };
     if !out.status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, format!("vercmp {a} {b} exited non-zero")));
     }
@@ -268,6 +346,98 @@ fn vercmp(a: &str, b: &str) -> io::Result<std::cmp::Ordering> {
         "1"  => Ok(Ordering::Greater),
         other => Err(io::Error::new(io::ErrorKind::Other,
             format!("vercmp gave unparseable output {other:?} for {a} vs {b}"))),
+    }
+}
+
+/// Compare Arch versions via pacman when present, using a conservative fallback on non-Arch build hosts.
+/// Conservative libalpm-style version comparison fallback for build hosts without pacman's `vercmp` binary.
+/// Native Arch hosts still use the exact pacman implementation whenever available.
+fn version_segment_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let aa = a.as_bytes();
+    let bb = b.as_bytes();
+    let (mut i, mut j) = (0usize, 0usize);
+    loop {
+        while i < aa.len() && !aa[i].is_ascii_alphanumeric() && aa[i] != b'~' { i += 1; }
+        while j < bb.len() && !bb[j].is_ascii_alphanumeric() && bb[j] != b'~' { j += 1; }
+        if i < aa.len() && aa[i] == b'~' || j < bb.len() && bb[j] == b'~' {
+            match (aa.get(i) == Some(&b'~'), bb.get(j) == Some(&b'~')) {
+                (true, true) => { i += 1; j += 1; continue; }
+                (true, false) => return Ordering::Less,
+                (false, true) => return Ordering::Greater,
+                (false, false) => unreachable!(),
+            }
+        }
+        if i >= aa.len() || j >= bb.len() { break; }
+        let an = aa[i].is_ascii_digit();
+        let bn = bb[j].is_ascii_digit();
+        if an != bn { return if an { Ordering::Greater } else { Ordering::Less }; }
+        let (start_a, start_b, end_a, end_b) = if an {
+            let mut ea = i;
+            let mut eb = j;
+            while ea < aa.len() && aa[ea].is_ascii_digit() { ea += 1; }
+            while eb < bb.len() && bb[eb].is_ascii_digit() { eb += 1; }
+            let mut sa = i;
+            let mut sb = j;
+            while sa < ea && aa[sa] == b'0' { sa += 1; }
+            while sb < eb && bb[sb] == b'0' { sb += 1; }
+            (sa, sb, ea, eb)
+        } else {
+            let mut ea = i;
+            let mut eb = j;
+            while ea < aa.len() && aa[ea].is_ascii_alphabetic() { ea += 1; }
+            while eb < bb.len() && bb[eb].is_ascii_alphabetic() { eb += 1; }
+            (i, j, ea, eb)
+        };
+        let lhs = &aa[start_a..end_a];
+        let rhs = &bb[start_b..end_b];
+        if an && lhs.len() != rhs.len() {
+            return lhs.len().cmp(&rhs.len());
+        }
+        match lhs.cmp(rhs) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+        i = end_a;
+        j = end_b;
+    }
+    while i < aa.len() && !aa[i].is_ascii_alphanumeric() && aa[i] != b'~' { i += 1; }
+    while j < bb.len() && !bb[j].is_ascii_alphanumeric() && bb[j] != b'~' { j += 1; }
+    match (i >= aa.len(), j >= bb.len()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => Ordering::Equal,
+    }
+}
+
+fn fallback_vercmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn epoch_and_version(s: &str) -> (u64, &str) {
+        if let Some((epoch, rest)) = s.split_once(':') {
+            if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) {
+                return (epoch.parse().unwrap_or(0), rest);
+            }
+        }
+        (0, s)
+    }
+    let (ae, av) = epoch_and_version(a);
+    let (be, bv) = epoch_and_version(b);
+    match ae.cmp(&be) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    let (av, ar) = bv_parts(av);
+    let (bv, br) = bv_parts(bv);
+    match version_segment_cmp(av, bv) {
+        Ordering::Equal => version_segment_cmp(ar.unwrap_or("0"), br.unwrap_or("0")),
+        other => other,
+    }
+}
+fn bv_parts(s: &str) -> (&str, Option<&str>) {
+    match s.rsplit_once('-') {
+        Some((version, release)) => (version, Some(release)),
+        None => (s, None),
     }
 }
 
@@ -367,20 +537,42 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     //    tree is the alternative. We take the distro source so the .deb tooling matches the host.
     step("[1/6] fetch Debian kernel source", workp, &[],
         "if ! ls linux-source-*/ >/dev/null 2>&1; then \
-           sudo apt-get -y install linux-source build-essential fakeroot libncurses-dev bison flex libssl-dev libelf-dev; \
+           sudo apt-get -y install linux-source build-essential fakeroot libncurses-dev bison flex libssl-dev libelf-dev clang llvm lld bc dwarves sudo; \
            tar xaf /usr/src/linux-source-*.tar.* ; fi")?;
     // find the extracted source dir
     let src = first_dir(workp, "linux-source-").ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
         "linux-source-*/ not found — install the `linux-source` package for your kernel"))?;
     let srcp = Path::new(&src);
+    println!("Debian kernel source tree: {}", srcp.display());
 
     // 2. start from the running kernel's config, then overlay CachyOS-style tunes + the ARXOS delta.
     step("[2/6] seed config from the running kernel", srcp, &[],
         "cp -f /boot/config-$(uname -r) .config 2>/dev/null || make defconfig")?;
-    step("[3/6] apply CachyOS-style performance tunes", srcp, &[],
-        "./scripts/config --enable SCHED_BORE 2>/dev/null; \
-         ./scripts/config --set-val HZ 1000 --enable HZ_1000 --enable PREEMPT --enable TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr \
-           --enable TRANSPARENT_HUGEPAGE --enable LRU_GEN --enable LRU_GEN_ENABLED; true")?;
+    let cpu_level = cpu_target_level(&p.cpu_target, workp)?;
+    let pgov = if p.performance_governor { "yes" } else { "no" };
+    let flavor_key = p.flavor.key;
+    let thp = p.hugepages.as_str();
+    let hz = p.hz.as_str();
+    let cpu_level_s = cpu_level.to_string();
+    let tune_env = [
+        ("ARXOS_CPU_LEVEL", cpu_level_s.as_str()), ("ARXOS_HZ", hz), ("ARXOS_THP", thp),
+        ("ARXOS_PGOV", pgov), ("ARXOS_FLAVOR", flavor_key), ("ARXOS_LTO", p.flavor.lto),
+    ];
+    step("[3/6] apply available performance Kconfig options", srcp, &tune_env,
+        "set -e; \
+         ./scripts/config --set-val HZ \"$ARXOS_HZ\" --enable \"HZ_$ARXOS_HZ\" --enable TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr \
+           --enable TRANSPARENT_HUGEPAGE --enable \"TRANSPARENT_HUGEPAGE_$(printf %s \"$ARXOS_THP\" | tr '[:lower:]' '[:upper:]')\" \
+           --enable LRU_GEN --enable LRU_GEN_ENABLED; \
+         if grep -Rqs 'config SCHED_BORE' kernel/sched init; then ./scripts/config --enable SCHED_BORE; else echo 'NOTICE: Debian source has no BORE patch; upstream scheduler remains enabled.'; fi; \
+         if grep -Rqs 'config X86_64_VERSION' arch/x86; then ./scripts/config --enable GENERIC_CPU --set-val X86_64_VERSION \"$ARXOS_CPU_LEVEL\"; else echo 'ERROR: source cannot set an x86-64 CPU baseline' >&2; exit 7; fi; \
+         if [ \"$ARXOS_PGOV\" = yes ]; then ./scripts/config --enable CPU_FREQ_DEFAULT_GOV_PERFORMANCE; fi; \
+         if [ \"$ARXOS_LTO\" = thin ]; then ./scripts/config --enable LTO_CLANG_THIN; else ./scripts/config --disable LTO_CLANG_THIN --disable LTO_CLANG_FULL; fi; \
+         if [ \"$ARXOS_FLAVOR\" = rt ]; then ./scripts/config --enable PREEMPT_RT --disable LTO_CLANG_THIN --disable LTO_CLANG_FULL; fi; \
+         if [ \"$ARXOS_FLAVOR\" = hardened ]; then \
+           if grep -q '^CONFIG_ARCH_SUPPORTS_CFI_CLANG=y' .config; then ./scripts/config --enable CFI_CLANG --enable CFI_AUTO_DEFAULT; \
+           else echo 'ERROR: hardened flavor requested kCFI, but this source config does not support it' >&2; exit 8; fi; \
+         fi; \
+         make LLVM=1 olddefconfig")?;
 
     // 3. overlay the ARXOS hardening delta + Kali/ARXOS patches, then verify.
     let (pfiles, pdirs) = collect_patches(&bundled_patch_dirs(p.distro), &p.extra_patches);
@@ -391,22 +583,23 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     }
     let frag_str = frag.display().to_string();   // quoted env var, not shell-interpolated (path-safe)
     step("[4/6] overlay ARXOS config + verify hardening delta", srcp, &[("ARXOS_FRAG", frag_str.as_str())],
-        "./scripts/kconfig/merge_config.sh -m .config \"$ARXOS_FRAG\"; make olddefconfig; \
+        "set -e; ./scripts/kconfig/merge_config.sh -m .config \"$ARXOS_FRAG\"; make LLVM=1 olddefconfig; \
          ./scripts/config --enable INIT_ON_FREE_DEFAULT_ON --enable INIT_ON_ALLOC_DEFAULT_ON --disable HIBERNATION \
            --enable INTEL_IOMMU_DEFAULT_ON --enable IOMMU_DEFAULT_DMA_STRICT --enable SECURITY_LOCKDOWN_LSM_EARLY \
            --enable INTEGRITY --enable IMA --enable IMA_DEFAULT_HASH_SHA256 --enable SECURITY_DMESG_RESTRICT \
-           --enable LIVEPATCH; make olddefconfig")?;
+           --enable LIVEPATCH; make LLVM=1 olddefconfig")?;
     if !gate::verify(&format!("{src}/.config"), false) {
         return Err(io::Error::new(io::ErrorKind::Other, "ARXOS hardening delta missing after config — aborting before compile"));
     }
+    verify_tuning_config(Path::new(&format!("{src}/.config")), p, cpu_level, true)?;
 
     // 4. build .deb packages.
     let current = resources::detect(workp)?;
     current.report();
     resources::limit_kernel(srcp, current.link_jobs)?;
     let jobs = current.jobs.to_string();
-    step("[5/6] build .deb (long)", srcp, &[("KNAME", p.kname.as_str()), ("ARXOS_BUILD_JOBS", jobs.as_str())],
-        "make -j\"${ARXOS_BUILD_JOBS:?}\" LOCALVERSION=-$KNAME bindeb-pkg")?;
+    let make = if p.flavor.lto == "thin" { "make LLVM=1 -j\"$ARXOS_BUILD_JOBS\" LOCALVERSION=-$KNAME bindeb-pkg" } else { "make -j\"$ARXOS_BUILD_JOBS\" LOCALVERSION=-$KNAME bindeb-pkg" };
+    step("[5/6] build .deb (long)", srcp, &[("KNAME", p.kname.as_str()), ("ARXOS_BUILD_JOBS", jobs.as_str())], make)?;
     // tidy: keep this build's .debs, archive superseded older-version arxos .debs into prev/.
     let _ = step("[6/6] built packages + tidy output dir", workp, &[("KNAME", p.kname.as_str())], TIDY_DEBIAN);
     if let Some(dir) = &p.out {
@@ -570,6 +763,13 @@ mod tests {
         assert_eq!(vercmp("7.2.0-2", "7.2.5-1").unwrap(), Ordering::Less);
         // archived 7.2.5-1 vs installed 7.2.0-2 -> newer -> the guard would refuse
         assert_ne!(vercmp("7.2.5-1", "7.2.0-2").unwrap(), Ordering::Less);
+    }
+
+    #[test]
+    fn fallback_vercmp_handles_epoch_and_release() {
+        assert_eq!(fallback_vercmp("2:1.0-1", "1:9.0-99"), Ordering::Greater);
+        assert_eq!(fallback_vercmp("1.2.0-2", "1.2.0-1"), Ordering::Greater);
+        assert_eq!(fallback_vercmp("1.2.0", "1.2.0"), Ordering::Equal);
     }
 
     #[test]
