@@ -406,7 +406,6 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     let requested_ref = p.source_ref.as_deref().unwrap_or("");
     step("[1/5] fetch CachyOS linux-cachyos", workp, &[("ARXOS_SOURCE_REF", requested_ref)],
         "set -e; if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; fi; \
-         # PKGBUILD is tool-managed; discard only local edits to that file from an interrupted/older akt run. \
          git -C cos checkout -- linux-cachyos/PKGBUILD; \
          if [ -n \"$ARXOS_SOURCE_REF\" ]; then \
            git -C cos fetch -q --tags origin \"$ARXOS_SOURCE_REF\"; \
