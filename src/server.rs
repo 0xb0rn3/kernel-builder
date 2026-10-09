@@ -303,17 +303,32 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
             let d = Distro::detect();
             json(&mut s, &format!("{{\"distro\":\"{}\",\"supported\":{}}}", d.name(), d != Distro::Unknown))
         }
+        ("GET", "/api/system") => {
+            let work = crate::build::work_dir(Distro::detect(), "default")
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let info = crate::sysinfo::SystemInfo::detect(&work);
+            json(&mut s, &info.to_json())
+        }
         ("GET", "/api/plan") => {
+            let host = Distro::detect();
+            let target = Distro::parse_target(&q("target").unwrap_or_else(|| "host".into()), host).unwrap_or(host);
             let fl = flavor(&q("flavor").unwrap_or_else(|| "default".into())).unwrap_or(&FLAVORS[0]);
             let name = crate::kernel_name(&q("name").unwrap_or_else(|| "arxos".into())).unwrap_or_else(|_| "arxos".into());
             let outq = q("out").filter(|s| !s.is_empty());
             let rel = q("pkgrel").filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())).unwrap_or_else(|| "1".into());
-            json(&mut s, &Plan::resolve(Distro::detect(), fl, &name, outq.as_deref(), &rel).to_json())
+            let cpu = q("cpu").unwrap_or_else(|| "auto".into());
+            let hz = q("hz").unwrap_or_else(|| "1000".into());
+            let thp = q("thp").unwrap_or_else(|| "madvise".into());
+            let pgov = q("pgov").as_deref() == Some("1");
+            let plan = Plan::resolve(target, fl, &name, outq.as_deref(), &rel).with_tuning(&cpu, &hz, &thp, pgov);
+            json(&mut s, &plan.to_json())
         }
         ("GET", "/api/explain") => {
+            let host = Distro::detect();
+            let target = Distro::parse_target(&q("target").unwrap_or_else(|| "host".into()), host).unwrap_or(host);
             let fl = flavor(&q("flavor").unwrap_or_else(|| "default".into())).unwrap_or(&FLAVORS[0]);
             let name = crate::kernel_name(&q("name").unwrap_or_else(|| "arxos".into())).unwrap_or_else(|_| "arxos".into());
-            json(&mut s, &crate::explain::as_json(Distro::detect(), fl, &name))
+            json(&mut s, &crate::explain::as_json(target, fl, &name))
         }
         ("POST", "/api/build") => {
             if !ct_eq(&req_token, token) {
@@ -324,6 +339,11 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
             }
             let fl = q("flavor").unwrap_or_else(|| "default".into());
             let name = q("name");
+            let target = q("target").unwrap_or_else(|| "host".into());
+            let cpu = q("cpu").unwrap_or_else(|| "auto".into());
+            let hz = q("hz").unwrap_or_else(|| "1000".into());
+            let thp = q("thp").unwrap_or_else(|| "madvise".into());
+            let pgov = q("pgov").as_deref() == Some("1");
             let outq = q("out").filter(|s| !s.is_empty());
             let rel = q("pkgrel").filter(|s| !s.is_empty());
             let dry = q("dry").as_deref() == Some("1");
@@ -332,7 +352,13 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
                 Ok(out) => {
                     let err = out.try_clone()?;
                     let mut c = Command::new(exe);
-                    c.arg("build").arg("--flavor").arg(&fl);
+                    c.arg("build")
+                        .arg("--target-distro").arg(&target)
+                        .arg("--cpu-target").arg(&cpu)
+                        .arg("--hz").arg(&hz)
+                        .arg("--hugepages").arg(&thp)
+                        .arg("--flavor").arg(&fl);
+                    if pgov { c.arg("--performance-governor"); }
                     if let Some(n) = &name { c.arg("--name").arg(n); }
                     if let Some(o) = &outq { c.arg("--out").arg(o); }
                     if let Some(r) = &rel { c.arg("--pkgrel").arg(r); }
