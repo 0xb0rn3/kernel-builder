@@ -101,11 +101,17 @@ fn absolute_dir(path: &Path) -> io::Result<PathBuf> {
     Ok(canonical)
 }
 fn output_path(work: &Path, plan: &Plan) -> PathBuf {
-    let Some(raw) = &plan.out else { return work.to_path_buf(); };
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") { return PathBuf::from(home).join(rest); }
-    }
-    PathBuf::from(raw)
+    let requested = if let Some(raw) = &plan.out {
+        if let Some(rest) = raw.strip_prefix("~/") {
+            std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest)
+        } else {
+            PathBuf::from(raw)
+        }
+    } else {
+        work.join("packages")
+    };
+    // A separate output directory avoids mounting the same host directory at both /work and /out.
+    if requested == work { work.join("packages") } else { requested }
 }
 fn containerfile(target: Distro) -> &'static str {
     match target {
@@ -238,7 +244,7 @@ pub fn run(plan: &Plan, args: &[String], host: Distro) -> io::Result<()> {
         run.args(["-e", &format!("AKT_MAX_LTO_JOBS={cap}")]);
     }
     run.args(["-v", &work_mount, "-v", &out_mount, "-w", "/src", &image]);
-    run.args(&child[1..]);
+    run.args(&child);
     let status = run.status()?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, format!("{} target build failed inside container", plan.distro.name())));
