@@ -321,9 +321,13 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
             let thp = q("thp").unwrap_or_else(|| "madvise".into());
             let pgov = q("pgov").as_deref() == Some("1");
             let max_jobs = q("maxjobs").and_then(|v| if v == "auto" { None } else { v.parse::<usize>().ok() }).filter(|v| *v > 0);
+            let lto_jobs = q("ltojobs").and_then(|v| if v == "auto" { None } else { v.parse::<usize>().ok() }).filter(|v| *v > 0);
+            let source_ref = q("source").filter(|v| !v.is_empty());
             let plan = Plan::resolve(target, fl, &name, outq.as_deref(), &rel)
                 .with_tuning(&cpu, &hz, &thp, pgov)
-                .with_max_jobs(max_jobs);
+                .with_max_jobs(max_jobs)
+                .with_thinlto_jobs(lto_jobs)
+                .with_source_ref(source_ref);
             json(&mut s, &plan.to_json())
         }
         ("GET", "/api/explain") => {
@@ -348,6 +352,8 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
             let thp = q("thp").unwrap_or_else(|| "madvise".into());
             let pgov = q("pgov").as_deref() == Some("1");
             let max_jobs = q("maxjobs").unwrap_or_else(|| "auto".into());
+            let lto_jobs = q("ltojobs").unwrap_or_else(|| "auto".into());
+            let source_ref = q("source").filter(|v| !v.is_empty());
             let outq = q("out").filter(|s| !s.is_empty());
             let rel = q("pkgrel").filter(|s| !s.is_empty());
             let dry = q("dry").as_deref() == Some("1");
@@ -362,7 +368,9 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
                         .arg("--hz").arg(&hz)
                         .arg("--hugepages").arg(&thp)
                         .arg("--max-jobs").arg(&max_jobs)
+                        .arg("--thinlto-jobs").arg(&lto_jobs)
                         .arg("--flavor").arg(&fl);
+                    if let Some(source) = &source_ref { c.arg("--source-ref").arg(source); }
                     if pgov { c.arg("--performance-governor"); }
                     if let Some(n) = &name { c.arg("--name").arg(n); }
                     if let Some(o) = &outq { c.arg("--out").arg(o); }
