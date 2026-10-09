@@ -1,0 +1,26 @@
+name: Rust validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Compile
+        run: cargo check --locked
+      - name: Run hardware inventory tests
+        run: cargo test --locked sysinfo::tests
+      - name: Release build
+        run: cargo build --release --locked
