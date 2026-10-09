@@ -114,7 +114,7 @@ fn acquire_build_lock(work: &Path) -> io::Result<BuildLock> {
 
 /// Resolve a user-writable build workspace separately from the root-owned installed data.
 /// AKT_WORK remains the explicit override; otherwise use the user's XDG cache (or ~/.cache).
-fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
+pub fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
     if let Some(work) = std::env::var_os("AKT_WORK").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(work));
     }
@@ -153,6 +153,46 @@ pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
     }
 }
 
+fn cpu_target_level(target: &str, work: &Path) -> io::Result<u8> {
+    let level = if target == "auto" {
+        crate::sysinfo::SystemInfo::detect(work).x86_level.max(1)
+    } else if target == "portable" || target == "v1" { 1 }
+    else { target.strip_prefix('v').and_then(|v| v.parse::<u8>().ok()).unwrap_or(1) };
+    if !(1..=4).contains(&level) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "CPU target must resolve to x86-64-v1 through v4"));
+    }
+    Ok(level)
+}
+
+fn cpu_processor_opt(target: &str, work: &Path) -> io::Result<String> {
+    Ok(format!("GENERIC_V{}", cpu_target_level(target, work)?))
+}
+
+fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level: bool) -> io::Result<()> {
+    let text = std::fs::read_to_string(config)?;
+    let has = |line: &str| text.lines().any(|v| v.trim() == line);
+    let fail = |what: &str| io::Error::new(io::ErrorKind::InvalidData,
+        format!("requested tune did not survive Kconfig resolution: {what}; refusing to compile"));
+    if !has(&format!("CONFIG_HZ={}", p.hz)) {
+        return Err(fail(&format!("CONFIG_HZ={}", p.hz)));
+    }
+    let thp = format!("CONFIG_TRANSPARENT_HUGEPAGE_{}=y", p.hugepages.to_ascii_uppercase());
+    if !has(&thp) { return Err(fail(&thp)); }
+    if p.performance_governor && !has("CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y") {
+        return Err(fail("CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y"));
+    }
+    if check_cpu_level && !has(&format!("CONFIG_X86_64_VERSION={cpu_level}")) {
+        return Err(fail(&format!("CONFIG_X86_64_VERSION={cpu_level}")));
+    }
+    if p.flavor.key == "rt" && !has("CONFIG_PREEMPT_RT=y") {
+        return Err(fail("CONFIG_PREEMPT_RT=y"));
+    }
+    if p.flavor.lto == "thin" && !has("CONFIG_LTO_CLANG_THIN=y") {
+        return Err(fail("CONFIG_LTO_CLANG_THIN=y"));
+    }
+    Ok(())
+}
+
 fn build_arch(p: &Plan) -> io::Result<()> {
     let dd = data_dir();
     let work = work_dir(Distro::Arch, p.flavor.key)?.display().to_string();
@@ -171,8 +211,12 @@ fn build_arch(p: &Plan) -> io::Result<()> {
 
     let base = format!("{work}/cos/linux-cachyos");
     let basep = Path::new(&base);
+    let cpu_opt = cpu_processor_opt(&p.cpu_target, workp)?;
+    let pgov = if p.performance_governor { "yes" } else { "no" };
+    let kcfi = if p.flavor.key == "hardened" { "yes" } else { "no" };
     let env = [
-        ("_HZ_ticks", "1000"), ("_tcp_bbr3", "yes"), ("_processor_opt", "GENERIC_V3"),
+        ("_HZ_ticks", p.hz.as_str()), ("_tcp_bbr3", "yes"), ("_processor_opt", cpu_opt.as_str()),
+        ("_hugepage", p.hugepages.as_str()), ("_per_gov", pgov), ("_use_kcfi", kcfi),
         ("_cpusched", p.flavor.sched), ("_use_llvm_lto", p.flavor.lto), ("_preempt", "full"),
         ("_build_zfs", "no"), ("_build_nvidia_open", "no"), ("_cachy_config", "yes"),
         ("PACKAGER", "ARXOS <team@arxos.uk>"), ("ARXOS_PKGREL", p.pkgrel.as_str()), ("KNAME", p.kname.as_str()),
@@ -211,6 +255,12 @@ fn build_arch(p: &Plan) -> io::Result<()> {
            --enable LIVEPATCH; make LLVM=1 olddefconfig")?;
     if !gate::verify(&format!("{kdir}/.config"), false) {
         return Err(io::Error::new(io::ErrorKind::Other, "ARXOS hardening delta missing after config — aborting before compile"));
+    }
+    let selected_level = cpu_target_level(&p.cpu_target, workp)?;
+    verify_tuning_config(Path::new(&format!("{kdir}/.config")), p, selected_level, true)?;
+    let detected_level = crate::sysinfo::SystemInfo::detect(workp).x86_level;
+    if selected_level > detected_level && p.cpu_target != "portable" {
+        eprintln!("WARNING: requested x86-64-v{selected_level} exceeds locally detected baseline v{detected_level}; the kernel may not boot on this machine.");
     }
 
     // 5. build (-f overwrites a stale same-version pkg from a prior, e.g. wrong-config, build).
