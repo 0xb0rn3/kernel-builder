@@ -320,7 +320,10 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
             let hz = q("hz").unwrap_or_else(|| "1000".into());
             let thp = q("thp").unwrap_or_else(|| "madvise".into());
             let pgov = q("pgov").as_deref() == Some("1");
-            let plan = Plan::resolve(target, fl, &name, outq.as_deref(), &rel).with_tuning(&cpu, &hz, &thp, pgov);
+            let max_jobs = q("maxjobs").and_then(|v| if v == "auto" { None } else { v.parse::<usize>().ok() }).filter(|v| *v > 0);
+            let plan = Plan::resolve(target, fl, &name, outq.as_deref(), &rel)
+                .with_tuning(&cpu, &hz, &thp, pgov)
+                .with_max_jobs(max_jobs);
             json(&mut s, &plan.to_json())
         }
         ("GET", "/api/explain") => {
@@ -344,6 +347,7 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
             let hz = q("hz").unwrap_or_else(|| "1000".into());
             let thp = q("thp").unwrap_or_else(|| "madvise".into());
             let pgov = q("pgov").as_deref() == Some("1");
+            let max_jobs = q("maxjobs").unwrap_or_else(|| "auto".into());
             let outq = q("out").filter(|s| !s.is_empty());
             let rel = q("pkgrel").filter(|s| !s.is_empty());
             let dry = q("dry").as_deref() == Some("1");
@@ -357,6 +361,7 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
                         .arg("--cpu-target").arg(&cpu)
                         .arg("--hz").arg(&hz)
                         .arg("--hugepages").arg(&thp)
+                        .arg("--max-jobs").arg(&max_jobs)
                         .arg("--flavor").arg(&fl);
                     if pgov { c.arg("--performance-governor"); }
                     if let Some(n) = &name { c.arg("--name").arg(n); }
