@@ -332,8 +332,11 @@ fn pkg_identity(pkg: &Path) -> Option<(String, String)> {
 /// install the wrong kernel. Never falls back to a byte compare.
 fn vercmp(a: &str, b: &str) -> io::Result<std::cmp::Ordering> {
     use std::cmp::Ordering;
-    let out = Command::new("vercmp").arg(a).arg(b).output()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("vercmp unavailable (pacman not installed?): {e}")))?;
+    let out = match Command::new("vercmp").arg(a).arg(b).output() {
+        Ok(out) => out,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(fallback_vercmp(a, b)),
+        Err(e) => return Err(io::Error::new(io::ErrorKind::Other, format!("could not run vercmp: {e}"))),
+    };
     if !out.status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, format!("vercmp {a} {b} exited non-zero")));
     }
@@ -343,6 +346,98 @@ fn vercmp(a: &str, b: &str) -> io::Result<std::cmp::Ordering> {
         "1"  => Ok(Ordering::Greater),
         other => Err(io::Error::new(io::ErrorKind::Other,
             format!("vercmp gave unparseable output {other:?} for {a} vs {b}"))),
+    }
+}
+
+/// Compare Arch versions via pacman when present, using a conservative fallback on non-Arch build hosts.
+/// Conservative libalpm-style version comparison fallback for build hosts without pacman's `vercmp` binary.
+/// Native Arch hosts still use the exact pacman implementation whenever available.
+fn version_segment_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let aa = a.as_bytes();
+    let bb = b.as_bytes();
+    let (mut i, mut j) = (0usize, 0usize);
+    loop {
+        while i < aa.len() && !aa[i].is_ascii_alphanumeric() && aa[i] != b'~' { i += 1; }
+        while j < bb.len() && !bb[j].is_ascii_alphanumeric() && bb[j] != b'~' { j += 1; }
+        if i < aa.len() && aa[i] == b'~' || j < bb.len() && bb[j] == b'~' {
+            match (aa.get(i) == Some(&b'~'), bb.get(j) == Some(&b'~')) {
+                (true, true) => { i += 1; j += 1; continue; }
+                (true, false) => return Ordering::Less,
+                (false, true) => return Ordering::Greater,
+                (false, false) => unreachable!(),
+            }
+        }
+        if i >= aa.len() || j >= bb.len() { break; }
+        let an = aa[i].is_ascii_digit();
+        let bn = bb[j].is_ascii_digit();
+        if an != bn { return if an { Ordering::Greater } else { Ordering::Less }; }
+        let (start_a, start_b, end_a, end_b) = if an {
+            let mut ea = i;
+            let mut eb = j;
+            while ea < aa.len() && aa[ea].is_ascii_digit() { ea += 1; }
+            while eb < bb.len() && bb[eb].is_ascii_digit() { eb += 1; }
+            let mut sa = i;
+            let mut sb = j;
+            while sa < ea && aa[sa] == b'0' { sa += 1; }
+            while sb < eb && bb[sb] == b'0' { sb += 1; }
+            (sa, sb, ea, eb)
+        } else {
+            let mut ea = i;
+            let mut eb = j;
+            while ea < aa.len() && aa[ea].is_ascii_alphabetic() { ea += 1; }
+            while eb < bb.len() && bb[eb].is_ascii_alphabetic() { eb += 1; }
+            (i, j, ea, eb)
+        };
+        let lhs = &aa[start_a..end_a];
+        let rhs = &bb[start_b..end_b];
+        if an && lhs.len() != rhs.len() {
+            return lhs.len().cmp(&rhs.len());
+        }
+        match lhs.cmp(rhs) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+        i = end_a;
+        j = end_b;
+    }
+    while i < aa.len() && !aa[i].is_ascii_alphanumeric() && aa[i] != b'~' { i += 1; }
+    while j < bb.len() && !bb[j].is_ascii_alphanumeric() && bb[j] != b'~' { j += 1; }
+    match (i >= aa.len(), j >= bb.len()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => Ordering::Equal,
+    }
+}
+
+fn fallback_vercmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn epoch_and_version(s: &str) -> (u64, &str) {
+        if let Some((epoch, rest)) = s.split_once(':') {
+            if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) {
+                return (epoch.parse().unwrap_or(0), rest);
+            }
+        }
+        (0, s)
+    }
+    let (ae, av) = epoch_and_version(a);
+    let (be, bv) = epoch_and_version(b);
+    match ae.cmp(&be) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    let (av, ar) = bv_parts(av);
+    let (bv, br) = bv_parts(bv);
+    match version_segment_cmp(av, bv) {
+        Ordering::Equal => version_segment_cmp(ar.unwrap_or("0"), br.unwrap_or("0")),
+        other => other,
+    }
+}
+fn bv_parts(s: &str) -> (&str, Option<&str>) {
+    match s.rsplit_once('-') {
+        Some((version, release)) => (version, Some(release)),
+        None => (s, None),
     }
 }
 
@@ -668,6 +763,13 @@ mod tests {
         assert_eq!(vercmp("7.2.0-2", "7.2.5-1").unwrap(), Ordering::Less);
         // archived 7.2.5-1 vs installed 7.2.0-2 -> newer -> the guard would refuse
         assert_ne!(vercmp("7.2.5-1", "7.2.0-2").unwrap(), Ordering::Less);
+    }
+
+    #[test]
+    fn fallback_vercmp_handles_epoch_and_release() {
+        assert_eq!(fallback_vercmp("2:1.0-1", "1:9.0-99"), Ordering::Greater);
+        assert_eq!(fallback_vercmp("1.2.0-2", "1.2.0-1"), Ordering::Greater);
+        assert_eq!(fallback_vercmp("1.2.0", "1.2.0"), Ordering::Equal);
     }
 
     #[test]
