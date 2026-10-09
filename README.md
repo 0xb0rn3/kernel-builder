@@ -185,13 +185,17 @@ Podman/Docker path as the CLI.
 
 ### Prebuilt binary release (no compiler needed)
 
-Resource controls are included in **v0.1.1** for x86-64 Linux, in both the native
-glibc and static musl builds. Earlier binaries do not contain this update.
-Each release includes the standalone binaries, bundles with installer/data,
-and `SHA256SUMS`. Download the checksum file alongside the assets and verify
-the selected files before extraction or installation.
+Published binaries contain only the features present when that release was built. The published
+`v0.3.0` assets predate the machine inventory, tuning controls, and cross-target builder described
+above. **They do not gain those features merely because this README has changed.**
 
-Grab the latest build from **[Releases](https://github.com/0xb0rn3/kernel-builder/releases)**:
+This branch prepares package version `0.4.0`. The updated release assets are not published yet:
+after this PR is merged, pushing the matching `v0.4.0` tag will trigger the release workflow. That
+workflow verifies the tag against `Cargo.toml`, checks formatting, runs tests, builds glibc and
+static-musl binaries, packages the GUI/config/patches/README, checks SHA-256 sums, and only then
+creates a GitHub release. Existing published releases are deliberately not overwritten.
+
+Grab the latest **published** build from **[Releases](https://github.com/0xb0rn3/kernel-builder/releases)**:
 
 ```sh
 tar xzf kernel-builder-*-x86_64-linux.tar.gz
@@ -204,7 +208,7 @@ The release also ships the bare `akt` binary on its own, enough for `akt detect`
 (any glibc), use the **`-musl`** static build (`akt-x86_64-linux-musl`, or the `*-musl.tar.gz`
 bundle); the plain build is smaller but needs a recent glibc.
 
-To fetch and verify the portable bundle using GitHub CLI:
+To fetch and verify the currently published `v0.3.0` portable bundle using GitHub CLI:
 
 ```sh
 mkdir kernel-builder-v0.3.0-download
@@ -217,6 +221,9 @@ cd kernel-builder
 ./akt --version
 sudo ./install.sh
 ```
+
+This example intentionally downloads the existing `v0.3.0` release; use the new options only
+after installing a future release that contains them, or build the feature branch from source.
 
 Checksums detect changed downloads; they are not an independent signature.
 
@@ -270,16 +277,15 @@ akt patches --patch ~/my-kernel-patches/         # list what WOULD be applied, i
 
 ## Status
 
-Development tool. This feature branch adds machine inventory, hardware-aware recommendations,
-tunable build/ThinLTO caps, configurable CPU baseline/tick rate/THP policy, source pinning, GUI
-controls, and disposable-container cross-target builds. It also adds a GitHub Actions workflow for
-formatting, compile checks, hardware-inventory unit tests and a release build.
+Development tool. This feature branch adds read-only hardware inventory and recommendations,
+tunable CPU/timer/THP/compiler/ThinLTO settings, source pinning, GUI controls, disposable-container
+cross-target builds, and automated packaging for future tagged releases.
 
-**Validation status for the new features:** not yet confirmed by CI in this branch, and no end-to-end
-kernel build was run as part of these changes. Container availability, source-specific Kconfig
-options, package output and successful boot remain to be tested. Do not install a newly built kernel
-on the daily-driver host until the code passes CI and the resulting packages are installed and
-boot-tested in a disposable VM.
+CI is being used to validate the Rust source and unit tests. No end-to-end Arch or Debian kernel build
+or boot test was run for this feature set. Source-specific Kconfig support, container permissions,
+package output, installer behavior and runtime boot still require testing. Do not install a new
+kernel on the daily-driver host until the builder passes CI and the resulting package is inspected
+and boot-tested in a disposable VM.
 
 For existing lock-error and local HTTP regression checks, see
 [the non-destructive VM procedure](tests/hardening-vm.md). Compile test binaries on the host, then
@@ -288,13 +294,25 @@ execute integration and runtime acceptance only inside the identified disposable
 Passing a config gate is not security certification. The tool cannot promise performance gains or
 support for every device; benchmark against a known kernel and keep a bootable fallback available.
 
-## Packaging a release
+## Packaging and publishing a release
 
-Compile native and `x86_64-unknown-linux-musl` release targets on the build host,
-then run `bash tools/package-release.sh /path/to/new-output-directory`.
-The helper refuses an existing output directory, packages only explicit runtime
-files, and creates checksums. It does not install, upload, or publish anything.
-Validate the exact assets in throwaway with `tests/release-vm.py` before publishing.
+For a local, non-publishing bundle build:
+
+```sh
+cargo test --locked
+cargo build --release --locked
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --locked --target x86_64-unknown-linux-musl
+bash tools/package-release.sh /path/to/new-output-directory
+(cd /path/to/new-output-directory && sha256sum --check SHA256SUMS)
+```
+
+The helper refuses an existing output directory and packages only explicit runtime files. It does
+not install, upload or publish anything. For a GitHub release, bump the Cargo version, merge the
+change, push the matching `vX.Y.Z` tag, and let `.github/workflows/release.yml` run validation and
+publish the generated assets. The workflow refuses a tag that does not match the package version or
+a release tag that already exists, so published assets are not silently replaced. Review
+`RELEASE_NOTES.md` and test the exact generated assets before tagging a release.
 
 ## License
 
