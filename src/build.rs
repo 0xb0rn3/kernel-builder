@@ -219,13 +219,23 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     initial.report();
     let jobs = initial.jobs.to_string();
 
-    // 1. fetch the CachyOS recipe (rolling latest).
-    step("[1/5] fetch CachyOS linux-cachyos", workp, &[],
-        "if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; \
-         else git -C cos pull -q || true; fi")?;
+    // 1. fetch the CachyOS recipe. A specified source ref is checked out detached and never pulled forward.
+    let requested_ref = p.source_ref.as_deref().unwrap_or("");
+    step("[1/5] fetch CachyOS linux-cachyos", workp, &[("ARXOS_SOURCE_REF", requested_ref)],
+        "set -e; if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; fi; \
+         if [ -n \"$ARXOS_SOURCE_REF\" ]; then \
+           git -C cos fetch -q --tags origin \"$ARXOS_SOURCE_REF\"; \
+           git -C cos checkout -q --detach FETCH_HEAD; \
+         else git -C cos pull -q --ff-only || true; fi")?;
 
     let base = format!("{work}/cos/linux-cachyos");
     let basep = Path::new(&base);
+    let revision = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(basep).output()?;
+    if !revision.status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "cannot identify the CachyOS recipe revision"));
+    }
+    println!("source revision: {}", String::from_utf8_lossy(&revision.stdout).trim());
+    println!("source selection: {}", if p.source_ref.is_some() { p.source_ref.as_deref().unwrap_or("pinned") } else { "rolling latest" });
     let cpu_opt = cpu_processor_opt(&p.cpu_target, workp)?;
     let pgov = if p.performance_governor { "yes" } else { "no" };
     let kcfi = if p.flavor.key == "hardened" { "yes" } else { "no" };
@@ -438,6 +448,7 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     let src = first_dir(workp, "linux-source-").ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
         "linux-source-*/ not found — install the `linux-source` package for your kernel"))?;
     let srcp = Path::new(&src);
+    println!("Debian kernel source tree: {}", srcp.display());
 
     // 2. start from the running kernel's config, then overlay CachyOS-style tunes + the ARXOS delta.
     step("[2/6] seed config from the running kernel", srcp, &[],
