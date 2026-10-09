@@ -75,6 +75,7 @@ pub struct Plan {
     pub hz: String,            // scheduler tick rate; verified against chosen source config
     pub hugepages: String,     // madvise or always
     pub performance_governor: bool, // opt-in; off by default for laptops
+    pub max_jobs: Option<usize>, // optional cap, further clamped by resource planner
     pub base: String,          // upstream base we fork/patch
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
@@ -92,7 +93,7 @@ impl Plan {
             Distro::Arch => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "CachyOS linux-cachyos (rolling latest)".into(),
                 tunes: vec![
@@ -105,7 +106,7 @@ impl Plan {
             Distro::Debian => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "Debian kernel source (apt source / linux-source)".into(),
                 tunes: vec![
@@ -122,7 +123,7 @@ impl Plan {
             Distro::Unknown => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "unknown host".into(), tunes: vec![], overlays: vec![], patch_sets: vec![],
                 output: "unsupported — akt supports Arch-family and Debian-family hosts".into(),
@@ -153,6 +154,15 @@ impl Plan {
         }
         self
     }
+    /// Attach an optional user job cap; the resource planner still clamps it to detected limits.
+    pub fn with_max_jobs(mut self, cap: Option<usize>) -> Plan {
+        self.max_jobs = cap;
+        if let Some(first) = self.tunes.first_mut() {
+            let cap_label = cap.map(|v| v.to_string()).unwrap_or_else(|| "automatic".into());
+            *first = format!("{}, requested max build jobs={cap_label}", first);
+        }
+        self
+    }
     /// Attach user-supplied patches (from --patch) and the apply mode (strict = fail-fast).
     pub fn with_patches(mut self, extra: Vec<String>, strict: bool) -> Plan {
         self.extra_patches = extra;
@@ -165,9 +175,10 @@ impl Plan {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
+            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"max_jobs\":{},\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
             self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")),
-            json_escape(&self.cpu_target), json_escape(&self.hz), json_escape(&self.hugepages), self.performance_governor, json_escape(&self.base),
+            json_escape(&self.cpu_target), json_escape(&self.hz), json_escape(&self.hugepages), self.performance_governor,
+            self.max_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), json_escape(&self.base),
             arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), arr(&self.extra_patches), self.patch_strict, json_escape(&self.output))
     }
 }
