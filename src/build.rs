@@ -1041,8 +1041,10 @@ b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')
 "#;
         let extra_sum = "de".repeat(64);
         let bore_sum = "03b6d236610ae00db9395819aa7578860f45ce10839fbdcee80fb8e9e9c8810896d20680c63e43c416ae23b371efd737bc0a14831e1f7d8111578c1f65bda68f";
+        let extra_sum = "de".repeat(64);
+        let bore_sum = "03b6d236610ae00db9395819aa7578860f45ce10839fbdcee80fb8e9e9c8810896d20680c63e43c416ae23b371efd737bc0a14831e1f7d8111578c1f65bda68f";
         let newer_srcinfo = format!(
-            "source = https://example.invalid/linux.tar.gz\nsource = https://example.invalid/linux.tar.gz.asc\nsource = config\nsource = https://raw.githubusercontent.com/cachyos/kernel-patches/master/7.2/sched/0001-bore-cachy.patch\nsource = https://raw.githubusercontent.com/cachyos/kernel-patches/master/7.2/misc/0001-new-upstream.patch\nb2sums = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nb2sums = SKIP\nb2sums = cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\nb2sums = {bore_sum}\nb2sums = {extra_sum}\n"
+            "source = https://example.invalid/linux.tar.gz\\nsource = https://example.invalid/linux.tar.gz.asc\\nsource = config\\nsource = https://raw.githubusercontent.com/cachyos/kernel-patches/master/7.2/sched/0001-bore-cachy.patch\\nsource = https://raw.githubusercontent.com/cachyos/kernel-patches/master/7.2/misc/0001-new-upstream.patch\\nb2sums = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nb2sums = SKIP\\nb2sums = cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\nb2sums = {bore_sum}\\nb2sums = {extra_sum}\\n"
         );
         let repaired = repair_cachyos_conditional_b2sums_text(&input, "bore", "thin", &newer_srcinfo).unwrap();
         let values = declared_b2sums_values(&repaired).unwrap();
