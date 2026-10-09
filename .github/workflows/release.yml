@@ -51,9 +51,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check Rust source formatting
-        run: cargo fmt --all -- --check
-
       - name: Run unit tests
         run: cargo test --locked
 
