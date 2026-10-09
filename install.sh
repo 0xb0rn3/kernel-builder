@@ -66,6 +66,7 @@ case "$MODE" in
     [[ -n "${HOME:-}" && "$HOME" != "/" ]] || { echo "HOME is not set to a usable user directory." >&2; exit 1; }
     BIN_DEST="$HOME/.local/bin/akt"
     DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+    [[ "$DATA_HOME" == /* ]] || DATA_HOME="$HOME/.local/share"
     DATA_DIR="$DATA_HOME/kernel-builder"
     DESKTOP_DIR="$DATA_HOME/applications"
     ;;
@@ -117,7 +118,9 @@ ensure_rust() {
     return 1
   }
 
-  local toolroot="${XDG_DATA_HOME:-$HOME/.local/share}/akt/toolchain"
+  local user_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+  [[ "$user_data_home" == /* ]] || user_data_home="$HOME/.local/share"
+  local toolroot="$user_data_home/akt/toolchain"
   export CARGO_HOME="${AKT_CARGO_HOME:-$toolroot/cargo}"
   export RUSTUP_HOME="${AKT_RUSTUP_HOME:-$toolroot/rustup}"
   export PATH="$CARGO_HOME/bin:$PATH"
@@ -178,8 +181,8 @@ as_target install -Dm755 "$BIN" "$BIN_DEST"
 echo ">> installing configuration, patches, and GUI to $DATA_DIR"
 as_target install -d "$DATA_DIR/config" "$DATA_DIR/patches/arxos" "$DATA_DIR/patches/kali" "$DATA_DIR/ui"
 as_target cp -a "$HERE/config/." "$DATA_DIR/config/"
-as_target cp -a "$HERE/patches/arxos/." "$DATA_DIR/patches/arxos/" 2>/dev/null || true
-as_target cp -a "$HERE/patches/kali/." "$DATA_DIR/patches/kali/" 2>/dev/null || true
+as_target cp -a "$HERE/patches/arxos/." "$DATA_DIR/patches/arxos/"
+as_target cp -a "$HERE/patches/kali/." "$DATA_DIR/patches/kali/"
 as_target install -Dm644 "$HERE/ui/index.html" "$DATA_DIR/ui/index.html"
 
 if [[ -n "$DESKTOP_DIR" ]]; then
