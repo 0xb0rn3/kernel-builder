@@ -221,8 +221,8 @@ pub fn run(plan: &Plan, args: &[String], host: Distro) -> io::Result<()> {
     let uid_arg = format!("BUILD_UID={uid}");
     let gid_arg = format!("BUILD_GID={gid}");
     let status = Command::new(&runtime)
-        .args(["build", "--build-arg", &uid_arg, "--build-arg", &gid_arg, "-t", &image, "-f", "Containerfile"])
-        .arg(&root).status()?;
+        .args(["build", "--build-arg", &uid_arg, "--build-arg", &gid_arg, "-t", &image, "-f"])
+        .arg(root.join("Containerfile")).arg(&root).status()?;
     if !status.success() { return Err(io::Error::new(io::ErrorKind::Other, format!("{runtime} image build failed"))); }
     let child = child_args(args, &staged_patches)?;
     let work_mount = format!("{}:/work", work.display());
