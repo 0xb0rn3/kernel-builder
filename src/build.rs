@@ -1031,6 +1031,26 @@ b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')
     }
 
     #[test]
+    fn cachyos_checksum_sync_picks_up_additional_upstream_variant_patches() {
+        let input = r#"
+source=("https://example.invalid/linux.tar.gz" "https://example.invalid/linux.tar.gz.asc" "config")
+source+=("${_patchsource}/misc/dkms-clang.patch")
+source+=("${_patchsource}/sched/0001-bore-cachy.patch")
+source+=("${_patchsource}/misc/0001-new-upstream.patch")
+b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')
+"#;
+        let extra_sum = "de".repeat(64);
+        let newer_srcinfo = BORE_SRCINFO
+            .replace("source = config\nb2sums = ", &format!("source = config\nsource = https://raw.githubusercontent.com/cachyos/kernel-patches/master/7.2/misc/0001-new-upstream.patch\nb2sums = "))
+            .replace("b2sums = 03b6d236", &format!("b2sums = cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\nb2sums = 03b6d236"))
+            .replace("b2sums = cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\nb2sums = 03b6d236", &format!("b2sums = cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\nb2sums = {extra_sum}\nb2sums = 03b6d236"));
+        let repaired = repair_cachyos_conditional_b2sums_text(&input, "bore", "thin", &newer_srcinfo).unwrap();
+        let values = declared_b2sums_values(&repaired).unwrap();
+        assert_eq!(values.len(), 6);
+        assert!(values.contains(&extra_sum));
+    }
+
+    #[test]
     fn cachyos_checksum_sync_removes_dkms_sum_when_lto_disabled() {
         let input = r#"
 source=("https://example.invalid/linux.tar.gz" "https://example.invalid/linux.tar.gz.asc" "config")
@@ -1048,7 +1068,7 @@ b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')
         let input = r#"source+=("\${_patchsource}/sched/0001-bore-cachy.patch")
 b2sums=('archive' 'SKIP' 'config-sum' 'dkms-sum')"#;
         let error = repair_cachyos_conditional_b2sums_text(input, "bore", "thin", "source = config\nb2sums = SKIP").unwrap_err();
-        assert!(error.to_string().contains("exactly one checksum for sched/0001-bore-cachy.patch"));
+        assert!(error.to_string().contains("does not include sched/0001-bore-cachy.patch"));
     }
 
     // vercmp must use real version ordering, not byte ordering (the classic 7.9 vs 7.10 trap).
