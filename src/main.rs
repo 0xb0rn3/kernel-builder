@@ -135,18 +135,21 @@ impl Plan {
         self.hz = hz.to_string();
         self.hugepages = hugepages.to_string();
         self.performance_governor = performance_governor;
-        if let Some(first) = self.tunes.first_mut() {
+        if !self.tunes.is_empty() {
             let target = if cpu_target == "auto" {
                 crate::sysinfo::SystemInfo::detect(std::path::Path::new(".")).recommended_cpu_target()
             } else if cpu_target == "portable" { "v1".to_string() } else { cpu_target.to_string() };
-            *first = if self.distro == Distro::Arch {
-                format!("CachyOS knobs: scheduler={}, LTO={}, CPU baseline={}, HZ={}, THP={}, performance governor={}",
-                    self.flavor.sched, self.flavor.lto, target, self.hz, self.hugepages,
-                    if self.performance_governor { "on (opt-in)" } else { "off" })
-            } else if self.distro == Distro::Debian {
-                format!("Debian Kconfig: CPU target={}, HZ={}, THP={}, performance governor={}; unavailable options must fail verification",
-                    self.cpu_target, self.hz, self.hugepages, if self.performance_governor { "on (opt-in)" } else { "off" })
-            } else { first.clone() };
+            let sched = self.flavor.sched;
+            let lto = self.flavor.lto;
+            let hz = self.hz.clone();
+            let hugepages = self.hugepages.clone();
+            let pgov = if self.performance_governor { "on (opt-in)" } else { "off" };
+            let line = match self.distro {
+                Distro::Arch => format!("CachyOS knobs: scheduler={sched}, LTO={lto}, CPU baseline={target}, HZ={hz}, THP={hugepages}, performance governor={pgov}"),
+                Distro::Debian => format!("Debian Kconfig: CPU target={target}, HZ={hz}, THP={hugepages}, performance governor={pgov}; unavailable options must fail verification"),
+                Distro::Unknown => String::new(),
+            };
+            self.tunes[0] = line;
         }
         self
     }
