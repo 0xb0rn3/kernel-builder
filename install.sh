@@ -85,9 +85,6 @@ BIN=""
 if [[ -x "$HERE/akt" ]]; then
   BIN="$HERE/akt"
   echo ">> using prebuilt akt binary; Rust is not required"
-elif [[ -x "$HERE/target/release/akt" ]]; then
-  BIN="$HERE/target/release/akt"
-  echo ">> using the already-built release binary"
 else
   if ! command -v cargo >/dev/null 2>&1; then
     install_rust() {
