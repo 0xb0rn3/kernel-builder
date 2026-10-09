@@ -11,6 +11,8 @@ mod explain;
 mod gate;
 mod server;
 mod resources;
+mod sysinfo;
+mod container_build;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,14 +24,23 @@ pub enum Distro { Arch, Debian, Unknown }
 
 impl Distro {
     pub fn detect() -> Distro {
-        let os = std::fs::read_to_string("/etc/os-release").unwrap_or_default().to_lowercase();
-        let has = |k: &str| os.contains(k);
-        if has("arxos") || has("id=arch") || has("cachyos") || has("id_like=arch") || has("arch linux") { Distro::Arch }
-        else if has("id=debian") || has("id=ubuntu") || has("id=kali") || has("id_like=debian") { Distro::Debian }
+        let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let mut id = String::new();
+        let mut like = String::new();
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("ID=") { id = v.trim_matches('"').to_ascii_lowercase(); }
+            if let Some(v) = line.strip_prefix("ID_LIKE=") { like = v.trim_matches('"').to_ascii_lowercase(); }
+        }
+        let ids: Vec<&str> = std::iter::once(id.as_str()).chain(like.split_whitespace()).collect();
+        if ids.iter().any(|v| matches!(*v, "arxos" | "arch" | "cachyos")) { Distro::Arch }
+        else if ids.iter().any(|v| matches!(*v, "debian" | "ubuntu" | "kali")) { Distro::Debian }
         else { Distro::Unknown }
     }
     pub fn name(&self) -> &'static str {
         match self { Distro::Arch => "arch", Distro::Debian => "debian", Distro::Unknown => "unknown" }
+    }
+    pub fn parse_target(s: &str, host: Distro) -> Option<Distro> {
+        match s { "host" | "auto" => Some(host), "arch" => Some(Distro::Arch), "debian" => Some(Distro::Debian), _ => None }
     }
 }
 
@@ -60,6 +71,10 @@ pub struct Plan {
     pub kname: String,         // kernel name -> linux-<kname> (default "arxos"; set with --name / --rename)
     pub out: Option<String>,   // output dir for the finished packages (default: the build dir); --out
     pub pkgrel: String,        // package revision / custom version (default "1"); --pkgrel
+    pub cpu_target: String,    // auto, portable, v1..v4
+    pub hz: String,            // scheduler tick rate; verified against chosen source config
+    pub hugepages: String,     // madvise or always
+    pub performance_governor: bool, // opt-in; off by default for laptops
     pub base: String,          // upstream base we fork/patch
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
@@ -77,10 +92,11 @@ impl Plan {
             Distro::Arch => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false,
                 extra_patches: vec![], patch_strict: true,
                 base: "CachyOS linux-cachyos (rolling latest)".into(),
                 tunes: vec![
-                    format!("CachyOS env knobs: _cpusched={}, _use_llvm_lto={}, BBRv3, 1000Hz, x86-64-v3, THP", fl.sched, fl.lto),
+                    format!("CachyOS knobs: scheduler={}, LTO={}, CPU target=auto, HZ=1000, THP=madvise, performance governor=off", fl.sched, fl.lto),
                 ],
                 overlays: vec![arxos_frag],
                 patch_sets: vec![dd.join("patches/arxos").display().to_string()],
@@ -89,11 +105,12 @@ impl Plan {
             Distro::Debian => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false,
                 extra_patches: vec![], patch_strict: true,
                 base: "Debian kernel source (apt source / linux-source)".into(),
                 tunes: vec![
-                    "CachyOS tunes ported to a Kconfig fragment: BORE (or EEVDF), BBRv3, 1000Hz, full preempt, MGLRU, THP".into(),
-                    format!("scheduler={}, lto={}", fl.sched, fl.lto),
+                    "Debian source: requested Kconfig options will be checked; BORE/BBRv3 are not assumed without their patches".into(),
+                    format!("scheduler profile={}, LTO profile={}", fl.sched, fl.lto),
                 ],
                 overlays: vec![arxos_frag],
                 patch_sets: vec![
@@ -105,11 +122,33 @@ impl Plan {
             Distro::Unknown => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false,
                 extra_patches: vec![], patch_strict: true,
                 base: "unknown host".into(), tunes: vec![], overlays: vec![], patch_sets: vec![],
                 output: "unsupported — akt supports Arch-family and Debian-family hosts".into(),
             },
         }
+    }
+    /// Resolve hardware-aware tuning options shared by CLI, GUI and builder.
+    pub fn with_tuning(mut self, cpu_target: &str, hz: &str, hugepages: &str, performance_governor: bool) -> Plan {
+        self.cpu_target = cpu_target.to_string();
+        self.hz = hz.to_string();
+        self.hugepages = hugepages.to_string();
+        self.performance_governor = performance_governor;
+        if let Some(first) = self.tunes.first_mut() {
+            let target = if cpu_target == "auto" {
+                crate::sysinfo::SystemInfo::detect(std::path::Path::new(".")).recommended_cpu_target()
+            } else if cpu_target == "portable" { "v1".to_string() } else { cpu_target.to_string() };
+            *first = if self.distro == Distro::Arch {
+                format!("CachyOS knobs: scheduler={}, LTO={}, CPU baseline={}, HZ={}, THP={}, performance governor={}",
+                    self.flavor.sched, self.flavor.lto, target, self.hz, self.hugepages,
+                    if self.performance_governor { "on (opt-in)" } else { "off" })
+            } else if self.distro == Distro::Debian {
+                format!("Debian Kconfig: CPU target={}, HZ={}, THP={}, performance governor={}; unavailable options must fail verification",
+                    self.cpu_target, self.hz, self.hugepages, if self.performance_governor { "on (opt-in)" } else { "off" })
+            } else { first.clone() };
+        }
+        self
     }
     /// Attach user-supplied patches (from --patch) and the apply mode (strict = fail-fast).
     pub fn with_patches(mut self, extra: Vec<String>, strict: bool) -> Plan {
@@ -123,8 +162,9 @@ impl Plan {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
-            self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")), json_escape(&self.base),
+            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
+            self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")),
+            json_escape(&self.cpu_target), json_escape(&self.hz), json_escape(&self.hugepages), self.performance_governor, json_escape(&self.base),
             arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), arr(&self.extra_patches), self.patch_strict, json_escape(&self.output))
     }
 }
