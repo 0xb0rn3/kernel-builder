@@ -205,6 +205,27 @@ fn main() -> ExitCode {
         eprintln!("akt: '--output' is not supported; use '--out DIR' to select the package output directory");
         return ExitCode::FAILURE;
     }
+    let host_distro = Distro::detect();
+    let target_distro = match flag(&args, "--target-distro") {
+        Some(raw) => match Distro::parse_target(raw, host_distro) {
+            Some(d) => d,
+            None => { eprintln!("akt: --target-distro must be host, arch, or debian"); return ExitCode::FAILURE; }
+        },
+        None => host_distro,
+    };
+    let cpu_target = flag(&args, "--cpu-target").unwrap_or("auto");
+    if !matches!(cpu_target, "auto" | "portable" | "v1" | "v2" | "v3" | "v4") {
+        eprintln!("akt: --cpu-target must be auto, portable, v1, v2, v3, or v4"); return ExitCode::FAILURE;
+    }
+    let hz = flag(&args, "--hz").unwrap_or("1000");
+    if !matches!(hz, "1000" | "750" | "600" | "500" | "300" | "250" | "100") {
+        eprintln!("akt: --hz must be one of 1000, 750, 600, 500, 300, 250, or 100"); return ExitCode::FAILURE;
+    }
+    let hugepages = flag(&args, "--hugepages").unwrap_or("madvise");
+    if !matches!(hugepages, "madvise" | "always") {
+        eprintln!("akt: --hugepages must be madvise or always"); return ExitCode::FAILURE;
+    }
+    let performance_governor = has_flag(&args, "--performance-governor");
     let json = has_flag(&args, "--json");
     let fl = flavor(flag(&args, "--flavor").unwrap_or("default")).unwrap_or(&FLAVORS[0]);
     let kname = match kernel_name(flag(&args, "--name").or_else(|| flag(&args, "--rename")).unwrap_or("arxos")) {
@@ -241,7 +262,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "plan" => {
-            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel).with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_patches(extra_patches.clone(), patch_strict);
             if json { println!("{}", p.to_json()); }
             else {
@@ -257,7 +278,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "patches" => {
-            let p = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+            let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel).with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_patches(extra_patches.clone(), patch_strict);
             let (files, dirs) = build::collect_patches(&build::bundled_patch_dirs(p.distro), &p.extra_patches);
             if json {
@@ -278,20 +299,36 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "explain" => {
-            explain::print(Distro::detect(), fl, &kname, json);
+            explain::print(target_distro, fl, &kname, json);
+            ExitCode::SUCCESS
+        }
+        "system" | "recommend" => {
+            let work = build::work_dir(host_distro, "default").unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let info = sysinfo::SystemInfo::detect(&work);
+            if json { println!("{}", info.to_json()); } else { info.report(); }
             ExitCode::SUCCESS
         }
         "build" => {
             let dry = has_flag(&args, "--dry-run");
-            let plan = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel)
+            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_patches(extra_patches.clone(), patch_strict);
-            match build::run(plan, dry) {
+            let result = if target_distro != host_distro && !dry {
+                container_build::run(&plan, &args, host_distro)
+            } else {
+                build::run(plan, dry)
+            };
+            match result {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: build failed: {e}"); ExitCode::FAILURE }
             }
         }
         "rollback" => {
-            let plan = Plan::resolve(Distro::detect(), fl, &kname, out.as_deref(), &pkgrel);
+            if target_distro != host_distro {
+                eprintln!("akt: rollback operates on host-installed packages; do not set --target-distro for rollback");
+                return ExitCode::FAILURE;
+            }
+            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel);
             match build::rollback(&plan) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: rollback failed: {e}"); ExitCode::FAILURE }
@@ -318,13 +355,21 @@ fn usage() -> String {
     format!(
 "akt {VERSION} — ARXOS Kernel Tuner
 
-  detect                 show the host distro + which build path applies
+  detect                 show the host distro + which native build path applies
+  system [--json]        detect hardware and show build recommendations
   resources [--json]      inspect build CPU, RAM and disk limits (AKT_WORK path)
-  plan   [--flavor F]    print the tune plan (base, tunes, patches) without building
+  plan   [--target-distro host|arch|debian] [--flavor F] print the selected plan
   patches [--patch P]    list every patch that will be applied, in order, for this host
-  build  [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
-                         build a tuned kernel for this host
+  build  [--target-distro host|arch|debian] [--cpu-target auto|portable|v1|v2|v3|v4]
+         [--hz HZ] [--hugepages madvise|always] [--performance-governor]
+         [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
+                         build a kernel package; cross-distro builds use Podman/Docker
                          --name / --rename  builds linux-<NAME> (default: arxos)
+                         --target-distro    host (default), arch, or debian; cross-target needs Podman/Docker
+                         --cpu-target       auto detects local CPU level; portable is for shared packages
+                         --hz HZ            tick rate: 1000, 750, 600, 500, 300, 250, or 100
+                         --hugepages        madvise (default) or always
+                         --performance-governor opt in to the performance governor default (not recommended for most laptops)
                          --pkgrel N         package revision / custom version (default: 1)
                          --out DIR          write the finished packages to DIR
                          --patch P          extra patch to apply (a .patch/.diff file OR a
