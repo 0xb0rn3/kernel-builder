@@ -29,13 +29,13 @@ than guessed. Hardware recommendations are advisory, not a hardware safety guara
   disposable container and writes package artifacts to the selected output directory; this
   avoids installing the target distro's build dependencies onto the host. It is still a Linux
   container build, not a virtual machine or cross-architecture compiler.
-- **Source traceability**: Arch builds report the exact CachyOS source commit. `--source-ref`
-  can select an Arch/CachyOS tag, branch, or commit; leave it unset for the rolling source path.
-
-The hardening overlay requests allocation/free memory initialization, disabled
-hibernation, strict IOMMU defaults, early lockdown LSM, IMA, livepatch capability,
-and restricted kernel logs. These controls have platform and policy limits;
-they do not guarantee protection against every form of memory capture.
+- **Source traceability**: Arch builds report the exact CachyOS source commit. --source-ref
+  can select a CachyOS tag, branch, or commit; leave it unset for the rolling source path.
+- **Upstream checksum synchronization**: before source preparation, akt asks makepkg --printsrcinfo
+  for the active source URLs and rebuilds the PKGBUILD BLAKE2 checksum array using matching .SRCINFO
+  metadata committed alongside that same CachyOS revision. This follows upstream patch and checksum
+  changes without trusting a downloaded file's own digest. Missing, mismatched, or ambiguous
+  metadata stops the build; makepkg integrity verification is never skipped.
 
 The hardening overlay requests allocation/free memory initialization, disabled
 hibernation, strict IOMMU defaults, early lockdown LSM, IMA, livepatch capability,
@@ -183,64 +183,76 @@ Podman/Docker path as the CLI.
 
 ## Install
 
-### Prebuilt binary release (no compiler needed)
+### Prebuilt releases for Arch and Debian-family Linux
 
-Published binaries contain only the features present when that release was built. The published
-`v0.3.0` assets predate the machine inventory, tuning controls, and cross-target builder described
-above. **They do not gain those features merely because this README has changed.**
+The release contains **the kernel-builder application**, not precompiled ArxOS kernel packages. The
+same x86-64 Linux builder works on both Arch-family and Debian-family hosts; the native package path
+is selected automatically, while --target-distro arch and --target-distro debian can choose the
+other package family using Podman/Docker. Kernel packages are built on demand because source,
+configuration, CPU baseline, and hardware/module requirements vary.
 
-This branch prepares package version `0.4.0`. The updated release assets are not published yet:
-after this PR is merged, pushing the matching `v0.4.0` tag will trigger the release workflow. That
-workflow verifies the tag against `Cargo.toml`, runs tests, builds glibc and static-musl
-binaries, packages the GUI/config/patches/README, checks SHA-256 sums, and only then
-creates a GitHub release. Existing published releases are deliberately not overwritten.
+Each published release provides:
 
-Grab the latest **published** build from **[Releases](https://github.com/0xb0rn3/kernel-builder/releases)**:
+- kernel-builder-vX.Y.Z-x86_64-linux.tar.gz: prebuilt glibc binary plus installer, configuration, patches, GUI, and README.
+- kernel-builder-vX.Y.Z-x86_64-linux-musl.tar.gz: the same bundle with a static musl binary for broader Linux compatibility.
+- Standalone akt-x86_64-linux and akt-x86_64-linux-musl binaries.
+- SHA256SUMS for download integrity checks.
 
-```sh
-tar xzf kernel-builder-*-x86_64-linux.tar.gz
+The glibc build uses an Ubuntu 22.04 baseline to avoid depending on the newest runner's glibc;
+the static musl binary is the portability fallback. These assets target x86-64 Linux, including
+Arch and Debian. They are not compiled kernel packages.
+
+Download the latest published bundle from **[GitHub Releases](https://github.com/0xb0rn3/kernel-builder/releases)**, extract it, and run the installer **as your normal user**:
+
+~~~sh
+tar xzf kernel-builder-vX.Y.Z-x86_64-linux-musl.tar.gz
 cd kernel-builder
-sudo ./install.sh          # installs the prebuilt akt binary + tunes, patches, GUI
-```
+./install.sh
+~~~
 
-The release also ships the bare `akt` binary on its own, enough for `akt detect` / `plan` /
-`explain` / `gui` (the GUI is embedded in the binary). For maximum portability across any Linux
-(any glibc), use the **`-musl`** static build (`akt-x86_64-linux-musl`, or the `*-musl.tar.gz`
-bundle); the plain build is smaller but needs a recent glibc.
+The installer asks which mode you want:
 
-To fetch and verify the currently published `v0.3.0` portable bundle using GitHub CLI:
+~~~sh
+./install.sh --standalone   # keep binary and data beside the bundle; no sudo or PATH changes
+./install.sh --user         # install to ~/.local/bin and ~/.local/share
+./install.sh --system       # install to /usr/local/bin and /usr/share; sudo only for final writes
+~~~
 
-```sh
-mkdir kernel-builder-v0.3.0-download
-cd kernel-builder-v0.3.0-download
-gh release download v0.3.0 --repo 0xb0rn3/kernel-builder \
-  --pattern kernel-builder-v0.3.0-x86_64-linux-musl.tar.gz --pattern SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
-tar xzf kernel-builder-v0.3.0-x86_64-linux-musl.tar.gz
-cd kernel-builder
-./akt --version
-sudo ./install.sh
-```
+Release bundles already include a compiled binary, so installing from one does **not** require Rust.
+Standalone mode keeps configuration beside the binary. User mode changes only your home directory.
+System mode requests privilege for final file copies; do not run the entire installer through sudo.
 
-This example intentionally downloads the existing `v0.3.0` release; use the new options only
-after installing a future release that contains them, or build the feature branch from source.
+### Install from a source checkout
 
-Checksums detect changed downloads; they are not an independent signature.
-
-### From source (manual compile)
-
-```sh
+~~~sh
 git clone https://github.com/0xb0rn3/kernel-builder
 cd kernel-builder
-cargo build --release     # compile on the host, without root
-sudo ./install.sh          # install the freshly built binary + data
-```
+./install.sh
+~~~
 
-Compiling from source needs `rust`/`cargo`. Native Arch kernel builds need `base-devel`, Clang/LLVM,
-LLD, and the supporting kernel build tools; native Debian builds need `build-essential`, `fakeroot`,
-Clang/LLVM/LLD, and the usual kernel build dependencies. Cross-target builds need Podman or Docker;
-the tool creates a disposable target image and installs target build dependencies inside it. The
-first cross-target run may download a substantial base image and package set.
+If the checkout does not contain a usable akt binary and cargo is missing, the installer asks
+permission to install a minimal stable Rust toolchain using the official rustup installer over
+HTTPS. It places the toolchain under ~/.local/share/akt/toolchain (or your absolute XDG_DATA_HOME)
+and does not modify shell profiles. It then builds with cargo build --release --locked as your normal
+user before installing. Use --no-rust-install to opt out, or --yes for a scripted install that
+accepts the Rust bootstrap prompt.
+
+Native Arch kernel builds need base-devel, Clang/LLVM, LLD, Git, and the build dependencies required
+by the selected CachyOS recipe. Native Debian builds need build-essential, fakeroot, Clang/LLVM/LLD,
+Git, and the usual kernel build dependencies. Cross-target builds need Podman or Docker; the tool
+creates a disposable target container and installs target build dependencies inside it. The first
+cross-target run may download a substantial base image and package set.
+
+### Release automation
+
+A successful push to main publishes prebuilt assets for the current Cargo.toml version if that
+version has no release yet. A matching vX.Y.Z tag also triggers the workflow; a manual run is
+available from **Actions → Build and publish release assets**. The workflow checks the tag/version,
+runs tests, builds glibc and musl binaries, packages the standalone bundles, checks SHA256SUMS, and
+creates the release. Existing release assets are never overwritten. Bump the Cargo version for a
+later release; ordinary pushes after a version is already published do not replace it.
+
+Checksums detect changed downloads; SHA256SUMS is not an independent signature.
 
 ## Adding patches
 
@@ -277,15 +289,15 @@ akt patches --patch ~/my-kernel-patches/         # list what WOULD be applied, i
 
 ## Status
 
-Development tool. This feature branch adds read-only hardware inventory and recommendations,
-tunable CPU/timer/THP/compiler/ThinLTO settings, source pinning, GUI controls, disposable-container
-cross-target builds, and automated packaging for future tagged releases.
+Development tool. The app includes read-only machine inventory, tuning recommendations,
+source-metadata-based CachyOS checksum synchronization, an interactive standalone/user/system
+installer, prebuilt Linux releases for glibc and musl, and disposable-container cross-target builds.
 
-CI is being used to validate the Rust source and unit tests. No end-to-end Arch or Debian kernel build
-or boot test was run for this feature set. Source-specific Kconfig support, container permissions,
-package output, installer behavior and runtime boot still require testing. Do not install a new
-kernel on the daily-driver host until the builder passes CI and the resulting package is inspected
-and boot-tested in a disposable VM.
+CI validates Rust compilation, unit tests, and release packaging. End-to-end Arch/Debian kernel
+package builds and boot tests remain outstanding for this feature set. Source-specific Kconfig
+support, container permissions, generated package contents, installer behavior, and runtime boot
+still require testing. Do not install a new kernel on a daily-driver host until the package has
+been inspected and boot-tested in a disposable VM.
 
 For existing lock-error and local HTTP regression checks, see
 [the non-destructive VM procedure](tests/hardening-vm.md). Compile test binaries on the host, then
@@ -308,11 +320,11 @@ bash tools/package-release.sh /path/to/new-output-directory
 ```
 
 The helper refuses an existing output directory and packages only explicit runtime files. It does
-not install, upload or publish anything. For a GitHub release, bump the Cargo version, merge the
-change, push the matching `vX.Y.Z` tag, and let `.github/workflows/release.yml` run validation and
-publish the generated assets. The workflow refuses a tag that does not match the package version or
-a release tag that already exists, so published assets are not silently replaced. Review
-`RELEASE_NOTES.md` and test the exact generated assets before tagging a release.
+not install or upload anything itself. The release workflow runs it, verifies all sums, and publishes
+a new release when the Cargo version has not been released yet; it will not replace existing assets.
+For planned releases, bump the Cargo version and update RELEASE_NOTES.md. The glibc bundle is built on
+Ubuntu 22.04 for compatibility and the musl bundle is static; both run the builder on supported
+x86-64 Arch and Debian-family hosts.
 
 ## License
 
