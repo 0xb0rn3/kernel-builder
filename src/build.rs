@@ -235,10 +235,20 @@ fn checksum_in_srcinfo(
 
 fn srcinfo_checksum(
     repo_root: &Path,
+    base_srcinfo: &Path,
     pkgver: &str,
     pkgrel: &str,
     source: &str,
 ) -> io::Result<String> {
+    // Prefer the current generic PKGBUILD's own metadata when it defines this source (especially
+    // the variant-specific local "config" file). Scheduler-only URLs are resolved from sibling
+    // variant .SRCINFO files from the same repository commit.
+    if let Ok(contents) = std::fs::read_to_string(base_srcinfo) {
+        if let Some(sum) = checksum_in_srcinfo(&contents, pkgver, pkgrel, source) {
+            return Ok(sum);
+        }
+    }
+
     let entries = std::fs::read_dir(repo_root)?;
     let mut matches = Vec::new();
     for entry in entries.flatten() {
@@ -333,7 +343,13 @@ fn sync_cachyos_b2sums(pkgbuild: &Path, repo_root: &Path, env: &[(&str, &str)]) 
     let pkgrel = active.pkgrel.as_deref().unwrap_or("");
     let mut sums = Vec::with_capacity(active.sources.len());
     for source in &active.sources {
-        sums.push(srcinfo_checksum(repo_root, pkgver, pkgrel, source)?);
+        sums.push(srcinfo_checksum(
+            repo_root,
+            &pkgbuild.parent().unwrap_or(repo_root).join(".SRCINFO"),
+            pkgver,
+            pkgrel,
+            source,
+        )?);
     }
     if active.sources.len() != sums.len() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "source/checksum count mismatch after CachyOS metadata sync"));
@@ -948,10 +964,18 @@ mod tests {
         let patch_sum = "b".repeat(128);
         let archive_sum = "c".repeat(128);
         std::fs::write(variant.join(".SRCINFO"), format!(
-            "pkgbase = linux-cachyos-bore\npkgver = 7.9.1\npkgrel = 3\nsource = https://example.invalid/kernel.tar.gz\nb2sums = {archive_sum}\nsource = https://example.invalid/sched/0001-bore.patch\nb2sums = {patch_sum}\n"
+            "pkgbase = linux-cachyos-bore\npkgver = 7.9.1\npkgrel = 3\nsource = https://example.invalid/sched/0001-bore.patch\nb2sums = {patch_sum}\nsource = config\nb2sums = {}\n",
+            "e".repeat(128)
         )).unwrap();
-        assert_eq!(srcinfo_checksum(&root, "7.9.1", "3", "https://example.invalid/sched/0001-bore.patch").unwrap(), patch_sum);
-        assert_eq!(srcinfo_checksum(&root, "7.9.1", "3", "https://example.invalid/kernel.tar.gz").unwrap(), archive_sum);
+        let base = root.join("linux-cachyos");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join(".SRCINFO"), format!(
+            "pkgbase = linux-cachyos\npkgver = 7.9.1\npkgrel = 3\nsource = https://example.invalid/kernel.tar.gz\nb2sums = {archive_sum}\nsource = config\nb2sums = {}\n",
+            "d".repeat(128)
+        )).unwrap();
+        assert_eq!(srcinfo_checksum(&root, &base.join(".SRCINFO"), "7.9.1", "3", "https://example.invalid/sched/0001-bore.patch").unwrap(), patch_sum);
+        assert_eq!(srcinfo_checksum(&root, &base.join(".SRCINFO"), "7.9.1", "3", "https://example.invalid/kernel.tar.gz").unwrap(), archive_sum);
+        assert_eq!(srcinfo_checksum(&root, &base.join(".SRCINFO"), "7.9.1", "3", "config").unwrap(), "d".repeat(128));
         let _ = std::fs::remove_dir_all(root);
     }
 
