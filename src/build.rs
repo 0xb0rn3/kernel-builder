@@ -417,7 +417,7 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     //    tree is the alternative. We take the distro source so the .deb tooling matches the host.
     step("[1/6] fetch Debian kernel source", workp, &[],
         "if ! ls linux-source-*/ >/dev/null 2>&1; then \
-           sudo apt-get -y install linux-source build-essential fakeroot libncurses-dev bison flex libssl-dev libelf-dev; \
+           sudo apt-get -y install linux-source build-essential fakeroot libncurses-dev bison flex libssl-dev libelf-dev clang llvm lld bc dwarves sudo; \
            tar xaf /usr/src/linux-source-*.tar.* ; fi")?;
     // find the extracted source dir
     let src = first_dir(workp, "linux-source-").ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
@@ -427,10 +427,31 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     // 2. start from the running kernel's config, then overlay CachyOS-style tunes + the ARXOS delta.
     step("[2/6] seed config from the running kernel", srcp, &[],
         "cp -f /boot/config-$(uname -r) .config 2>/dev/null || make defconfig")?;
-    step("[3/6] apply CachyOS-style performance tunes", srcp, &[],
-        "./scripts/config --enable SCHED_BORE 2>/dev/null; \
-         ./scripts/config --set-val HZ 1000 --enable HZ_1000 --enable PREEMPT --enable TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr \
-           --enable TRANSPARENT_HUGEPAGE --enable LRU_GEN --enable LRU_GEN_ENABLED; true")?;
+    let cpu_level = cpu_target_level(&p.cpu_target, workp)?;
+    let pgov = if p.performance_governor { "yes" } else { "no" };
+    let flavor_key = p.flavor.key;
+    let thp = p.hugepages.as_str();
+    let hz = p.hz.as_str();
+    let cpu_level_s = cpu_level.to_string();
+    let tune_env = [
+        ("ARXOS_CPU_LEVEL", cpu_level_s.as_str()), ("ARXOS_HZ", hz), ("ARXOS_THP", thp),
+        ("ARXOS_PGOV", pgov), ("ARXOS_FLAVOR", flavor_key), ("ARXOS_LTO", p.flavor.lto),
+    ];
+    step("[3/6] apply available performance Kconfig options", srcp, &tune_env,
+        "set -e; \
+         ./scripts/config --set-val HZ \"$ARXOS_HZ\" --enable \"HZ_$ARXOS_HZ\" --enable TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr \
+           --enable TRANSPARENT_HUGEPAGE --enable \"TRANSPARENT_HUGEPAGE_$(printf %s \"$ARXOS_THP\" | tr '[:lower:]' '[:upper:]')\" \
+           --enable LRU_GEN --enable LRU_GEN_ENABLED; \
+         if grep -Rqs 'config SCHED_BORE' kernel/sched init; then ./scripts/config --enable SCHED_BORE; else echo 'NOTICE: Debian source has no BORE patch; upstream scheduler remains enabled.'; fi; \
+         if grep -Rqs 'config X86_64_VERSION' arch/x86; then ./scripts/config --enable GENERIC_CPU --set-val X86_64_VERSION \"$ARXOS_CPU_LEVEL\"; else echo 'ERROR: source cannot set an x86-64 CPU baseline' >&2; exit 7; fi; \
+         if [ \"$ARXOS_PGOV\" = yes ]; then ./scripts/config --enable CPU_FREQ_DEFAULT_GOV_PERFORMANCE; fi; \
+         if [ \"$ARXOS_LTO\" = thin ]; then ./scripts/config --enable LTO_CLANG_THIN; else ./scripts/config --disable LTO_CLANG_THIN --disable LTO_CLANG_FULL; fi; \
+         if [ \"$ARXOS_FLAVOR\" = rt ]; then ./scripts/config --enable PREEMPT_RT --disable LTO_CLANG_THIN --disable LTO_CLANG_FULL; fi; \
+         if [ \"$ARXOS_FLAVOR\" = hardened ]; then \
+           if grep -q '^CONFIG_ARCH_SUPPORTS_CFI_CLANG=y' .config; then ./scripts/config --enable CFI_CLANG --enable CFI_AUTO_DEFAULT; \
+           else echo 'ERROR: hardened flavor requested kCFI, but this source config does not support it' >&2; exit 8; fi; \
+         fi; \
+         make LLVM=1 olddefconfig")?;
 
     // 3. overlay the ARXOS hardening delta + Kali/ARXOS patches, then verify.
     let (pfiles, pdirs) = collect_patches(&bundled_patch_dirs(p.distro), &p.extra_patches);
@@ -441,22 +462,23 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     }
     let frag_str = frag.display().to_string();   // quoted env var, not shell-interpolated (path-safe)
     step("[4/6] overlay ARXOS config + verify hardening delta", srcp, &[("ARXOS_FRAG", frag_str.as_str())],
-        "./scripts/kconfig/merge_config.sh -m .config \"$ARXOS_FRAG\"; make olddefconfig; \
+        "set -e; ./scripts/kconfig/merge_config.sh -m .config \"$ARXOS_FRAG\"; make LLVM=1 olddefconfig; \
          ./scripts/config --enable INIT_ON_FREE_DEFAULT_ON --enable INIT_ON_ALLOC_DEFAULT_ON --disable HIBERNATION \
            --enable INTEL_IOMMU_DEFAULT_ON --enable IOMMU_DEFAULT_DMA_STRICT --enable SECURITY_LOCKDOWN_LSM_EARLY \
            --enable INTEGRITY --enable IMA --enable IMA_DEFAULT_HASH_SHA256 --enable SECURITY_DMESG_RESTRICT \
-           --enable LIVEPATCH; make olddefconfig")?;
+           --enable LIVEPATCH; make LLVM=1 olddefconfig")?;
     if !gate::verify(&format!("{src}/.config"), false) {
         return Err(io::Error::new(io::ErrorKind::Other, "ARXOS hardening delta missing after config — aborting before compile"));
     }
+    verify_tuning_config(Path::new(&format!("{src}/.config")), p, cpu_level, true)?;
 
     // 4. build .deb packages.
     let current = resources::detect(workp)?;
     current.report();
     resources::limit_kernel(srcp, current.link_jobs)?;
     let jobs = current.jobs.to_string();
-    step("[5/6] build .deb (long)", srcp, &[("KNAME", p.kname.as_str()), ("ARXOS_BUILD_JOBS", jobs.as_str())],
-        "make -j\"${ARXOS_BUILD_JOBS:?}\" LOCALVERSION=-$KNAME bindeb-pkg")?;
+    let make = if p.flavor.lto == "thin" { "make LLVM=1 -j\"$ARXOS_BUILD_JOBS\" LOCALVERSION=-$KNAME bindeb-pkg" } else { "make -j\"$ARXOS_BUILD_JOBS\" LOCALVERSION=-$KNAME bindeb-pkg" };
+    step("[5/6] build .deb (long)", srcp, &[("KNAME", p.kname.as_str()), ("ARXOS_BUILD_JOBS", jobs.as_str())], make)?;
     // tidy: keep this build's .debs, archive superseded older-version arxos .debs into prev/.
     let _ = step("[6/6] built packages + tidy output dir", workp, &[("KNAME", p.kname.as_str())], TIDY_DEBIAN);
     if let Some(dir) = &p.out {
