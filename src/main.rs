@@ -76,6 +76,8 @@ pub struct Plan {
     pub hugepages: String,     // madvise or always
     pub performance_governor: bool, // opt-in; off by default for laptops
     pub max_jobs: Option<usize>, // optional cap, further clamped by resource planner
+    pub thinlto_jobs: Option<usize>, // optional independent ThinLTO backend cap
+    pub source_ref: Option<String>, // pinned CachyOS recipe ref for Arch builds
     pub base: String,          // upstream base we fork/patch
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
@@ -93,7 +95,7 @@ impl Plan {
             Distro::Arch => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "CachyOS linux-cachyos (rolling latest)".into(),
                 tunes: vec![
@@ -106,7 +108,7 @@ impl Plan {
             Distro::Debian => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "Debian kernel source (apt source / linux-source)".into(),
                 tunes: vec![
@@ -123,7 +125,7 @@ impl Plan {
             Distro::Unknown => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "unknown host".into(), tunes: vec![], overlays: vec![], patch_sets: vec![],
                 output: "unsupported — akt supports Arch-family and Debian-family hosts".into(),
@@ -163,6 +165,22 @@ impl Plan {
         }
         self
     }
+    pub fn with_thinlto_jobs(mut self, cap: Option<usize>) -> Plan {
+        self.thinlto_jobs = cap;
+        if let Some(first) = self.tunes.first_mut() {
+            let label = cap.map(|v| v.to_string()).unwrap_or_else(|| "automatic".into());
+            first.push_str(&format!(", requested ThinLTO jobs={label}"));
+        }
+        self
+    }
+    pub fn with_source_ref(mut self, source_ref: Option<String>) -> Plan {
+        self.source_ref = source_ref;
+        if let Some(first) = self.tunes.first_mut() {
+            let label = self.source_ref.as_deref().unwrap_or("rolling");
+            first.push_str(&format!(", source ref={label}"));
+        }
+        self
+    }
     /// Attach user-supplied patches (from --patch) and the apply mode (strict = fail-fast).
     pub fn with_patches(mut self, extra: Vec<String>, strict: bool) -> Plan {
         self.extra_patches = extra;
@@ -175,10 +193,12 @@ impl Plan {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"max_jobs\":{},\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
+            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"max_jobs\":{},\"thinlto_jobs\":{},\"source_ref\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
             self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")),
             json_escape(&self.cpu_target), json_escape(&self.hz), json_escape(&self.hugepages), self.performance_governor,
-            self.max_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), json_escape(&self.base),
+            self.max_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+            self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
+            json_escape(self.source_ref.as_deref().unwrap_or("")), json_escape(&self.base),
             arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), arr(&self.extra_patches), self.patch_strict, json_escape(&self.output))
     }
 }
