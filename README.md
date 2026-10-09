@@ -191,8 +191,8 @@ above. **They do not gain those features merely because this README has changed.
 
 This branch prepares package version `0.4.0`. The updated release assets are not published yet:
 after this PR is merged, pushing the matching `v0.4.0` tag will trigger the release workflow. That
-workflow verifies the tag against `Cargo.toml`, checks formatting, runs tests, builds glibc and
-static-musl binaries, packages the GUI/config/patches/README, checks SHA-256 sums, and only then
+workflow verifies the tag against `Cargo.toml`, runs tests, builds glibc and static-musl
+binaries, packages the GUI/config/patches/README, checks SHA-256 sums, and only then
 creates a GitHub release. Existing published releases are deliberately not overwritten.
 
 Grab the latest **published** build from **[Releases](https://github.com/0xb0rn3/kernel-builder/releases)**:
