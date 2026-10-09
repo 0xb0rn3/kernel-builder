@@ -69,4 +69,4 @@ jobs:
           out="$RUNNER_TEMP/kernel-builder-release"
           version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
           docker run --rm -v "$out:/release:ro" archlinux:base bash -euo pipefail -c \
-            "pacman -U --noconfirm --nodeps /release/kernel-builder-${version}-1-x86_64.pkg.tar.zst >/dev/null && akt --version && test -f /usr/share/kernel-builder/config/arxos.fragment"
+            "pacman -Sy --noconfirm git make curl tar xz zstd >/dev/null && pacman -U --noconfirm /release/kernel-builder-${version}-1-x86_64.pkg.tar.zst >/dev/null && akt --version && test -f /usr/share/kernel-builder/config/arxos.fragment"
