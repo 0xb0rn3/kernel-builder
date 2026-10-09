@@ -159,7 +159,7 @@ impl Plan {
         self.max_jobs = cap;
         if let Some(first) = self.tunes.first_mut() {
             let cap_label = cap.map(|v| v.to_string()).unwrap_or_else(|| "automatic".into());
-            *first = format!("{}, requested max build jobs={cap_label}", first);
+            first.push_str(&format!(", requested max build jobs={cap_label}"));
         }
         self
     }
