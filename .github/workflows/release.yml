@@ -41,7 +41,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          expected="v$(sed -n 's/^version = "\\([^"]*\\)".*/\\1/p' Cargo.toml | head -n1)"
+          expected="v$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
           actual="${GITHUB_REF_NAME}"
           if [[ "$actual" != "$expected" ]]; then
             echo "Refusing release: tag $actual does not match Cargo.toml version $expected" >&2
