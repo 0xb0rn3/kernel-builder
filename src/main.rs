@@ -268,6 +268,29 @@ fn main() -> ExitCode {
         },
         None => std::env::var("AKT_MAX_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0),
     };
+    let thinlto_jobs = match flag(&args, "--thinlto-jobs") {
+        Some("auto") => { std::env::remove_var("AKT_MAX_LTO_JOBS"); None }
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if n > 0 => { std::env::set_var("AKT_MAX_LTO_JOBS", n.to_string()); Some(n) }
+            _ => { eprintln!("akt: --thinlto-jobs must be auto or a positive integer"); return ExitCode::FAILURE; }
+        },
+        None => std::env::var("AKT_MAX_LTO_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0),
+    };
+    let source_ref = flag(&args, "--source-ref").map(str::to_string);
+    if let Some(ref_name) = &source_ref {
+        let valid = !ref_name.is_empty() && ref_name.len() <= 200
+            && ref_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+            && !ref_name.starts_with('-') && !ref_name.starts_with('/') && !ref_name.ends_with('/')
+            && !ref_name.contains("..") && !ref_name.contains("//");
+        if !valid {
+            eprintln!("akt: --source-ref must be a tag, branch, or commit reference using letters, digits, '.', '_', '-', and '/'");
+            return ExitCode::FAILURE;
+        }
+        if target_distro != Distro::Arch {
+            eprintln!("akt: --source-ref applies to the Arch/CachyOS recipe; Debian chooses its source package version");
+            return ExitCode::FAILURE;
+        }
+    }
     let json = has_flag(&args, "--json");
     let fl = flavor(flag(&args, "--flavor").unwrap_or("default")).unwrap_or(&FLAVORS[0]);
     let kname = match kernel_name(flag(&args, "--name").or_else(|| flag(&args, "--rename")).unwrap_or("arxos")) {
@@ -307,6 +330,8 @@ fn main() -> ExitCode {
             let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
                 .with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_max_jobs(max_jobs)
+                .with_thinlto_jobs(thinlto_jobs)
+                .with_source_ref(source_ref.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             if json { println!("{}", p.to_json()); }
             else {
@@ -325,6 +350,8 @@ fn main() -> ExitCode {
             let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
                 .with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_max_jobs(max_jobs)
+                .with_thinlto_jobs(thinlto_jobs)
+                .with_source_ref(source_ref.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             let (files, dirs) = build::collect_patches(&build::bundled_patch_dirs(p.distro), &p.extra_patches);
             if json {
@@ -359,6 +386,8 @@ fn main() -> ExitCode {
             let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
                 .with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_max_jobs(max_jobs)
+                .with_thinlto_jobs(thinlto_jobs)
+                .with_source_ref(source_ref.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             let result = if target_distro != host_distro && !dry {
                 container_build::run(&plan, &args, host_distro)
@@ -408,7 +437,8 @@ fn usage() -> String {
   plan   [--target-distro host|arch|debian] [--flavor F] print the selected plan
   patches [--patch P]    list every patch that will be applied, in order, for this host
   build  [--target-distro host|arch|debian] [--cpu-target auto|portable|v1|v2|v3|v4]
-         [--hz HZ] [--hugepages madvise|always] [--max-jobs auto|N] [--performance-governor]
+         [--hz HZ] [--hugepages madvise|always] [--max-jobs auto|N]
+         [--thinlto-jobs auto|N] [--source-ref REF] [--performance-governor]
          [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
                          build a kernel package; cross-distro builds use Podman/Docker
                          --name / --rename  builds linux-<NAME> (default: arxos)
@@ -417,6 +447,8 @@ fn usage() -> String {
                          --hz HZ            tick rate: 1000, 750, 600, 500, 300, 250, or 100
                          --hugepages        madvise (default) or always
                          --max-jobs         auto lets the planner decide; N caps jobs and is further resource-limited
+                         --thinlto-jobs     auto or independent ThinLTO link-backend cap
+                         --source-ref       pin the Arch/CachyOS recipe to a tag, branch, or commit; default tracks rolling source
                          --performance-governor opt in to the performance governor default (not recommended for most laptops)
                          --pkgrel N         package revision / custom version (default: 1)
                          --out DIR          write the finished packages to DIR
