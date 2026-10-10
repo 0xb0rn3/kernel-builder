@@ -18,15 +18,25 @@ pub struct Resources {
     pub link_jobs: usize,
 }
 
-pub fn calculate(cpus: usize, available: u64, disk: u64, cap: Option<usize>) -> io::Result<Resources> {
+fn calculate_with_disk_policy(cpus: usize, available: u64, disk: u64, cap: Option<usize>, require_build_disk: bool) -> io::Result<Resources> {
     if cpus == 0 || cap == Some(0) { return Err(invalid("CPU/job count must be positive")); }
     let reserve = (available / 4).clamp(512 * MIB, 4 * GIB);
     let memory_jobs = available.saturating_sub(reserve) / (2 * GIB);
     if memory_jobs == 0 { return Err(invalid("not enough available RAM: need 2 GiB per job plus host reserve")); }
-    if disk < 60 * GIB { return Err(invalid("kernel work filesystem needs at least 60 GiB free")); }
+    if require_build_disk && disk < 60 * GIB { return Err(invalid("kernel work filesystem needs at least 60 GiB free")); }
     // Leave one logical CPU of headroom when possible. Never raise the user's cap.
     let jobs = cpus.saturating_sub(1).max(1).min(memory_jobs as usize).min(cap.unwrap_or(usize::MAX));
     Ok(Resources { cpus, available, reserve, disk, jobs, link_jobs: jobs.min(4) })
+}
+
+pub fn calculate(cpus: usize, available: u64, disk: u64, cap: Option<usize>) -> io::Result<Resources> {
+    calculate_with_disk_policy(cpus, available, disk, cap, true)
+}
+
+/// Resource plan for --dry-run: still checks usable RAM/CPU and reports real disk space, but a
+/// plan-only run does not require the 60 GiB needed for the actual kernel source/build tree.
+pub fn calculate_dry_run(cpus: usize, available: u64, disk: u64, cap: Option<usize>) -> io::Result<Resources> {
+    calculate_with_disk_policy(cpus, available, disk, cap, false)
 }
 
 fn mem_available(text: &str) -> io::Result<u64> {
@@ -63,7 +73,7 @@ fn cgroup_memory(root: &Path, membership: &str, mut available: u64) -> io::Resul
     Ok(available)
 }
 
-pub fn detect(work: &Path) -> io::Result<Resources> {
+fn detect_with_disk_policy(work: &Path, require_build_disk: bool) -> io::Result<Resources> {
     let cpus = std::thread::available_parallelism()?.get();
     let available = cgroup_memory(Path::new("/sys/fs/cgroup"), &fs::read_to_string("/proc/self/cgroup")?,
         mem_available(&fs::read_to_string("/proc/meminfo")?)?)?;
@@ -81,7 +91,7 @@ pub fn detect(work: &Path) -> io::Result<Resources> {
         Err(env::VarError::NotPresent) => None,
         Err(_) => return Err(invalid("invalid AKT_MAX_JOBS")),
     };
-    let mut plan = calculate(cpus, available, disk, cap)?;
+    let mut plan = calculate_with_disk_policy(cpus, available, disk, cap, require_build_disk)?;
     let lto_cap = match env::var("AKT_MAX_LTO_JOBS") {
         Ok(raw) => {
             let n = raw.parse::<usize>().map_err(|_| invalid("AKT_MAX_LTO_JOBS must be a positive integer"))?;
@@ -93,6 +103,15 @@ pub fn detect(work: &Path) -> io::Result<Resources> {
     };
     plan.link_jobs = plan.jobs.min(4).min(lto_cap.unwrap_or(usize::MAX));
     Ok(plan)
+}
+
+pub fn detect(work: &Path) -> io::Result<Resources> {
+    detect_with_disk_policy(work, true)
+}
+
+/// Detect and report resources for a dry run without imposing the full-build disk threshold.
+pub fn detect_dry_run(work: &Path) -> io::Result<Resources> {
+    detect_with_disk_policy(work, false)
 }
 
 impl Resources {
@@ -174,6 +193,12 @@ mod tests {
         assert_eq!(calculate(1, 8 * GIB, 100 * GIB, None).unwrap().jobs, 1);
         assert_eq!(calculate(8, 27 * GIB, 100 * GIB, Some(2)).unwrap().jobs, 2);
         assert_eq!(calculate(8, 27 * GIB, 100 * GIB, Some(999)).unwrap().jobs, 7);
+    }
+    #[test] fn dry_run_allows_small_disk_but_reports_actual_capacity() {
+        let r = calculate_dry_run(8, 8 * GIB, 30 * GIB, Some(2)).unwrap();
+        assert_eq!(r.disk, 30 * GIB);
+        assert_eq!(r.jobs, 2);
+        assert!(calculate(8, 8 * GIB, 30 * GIB, Some(2)).is_err());
     }
     #[test] fn insufficient_resources_fail() {
         assert!(calculate(8, 2 * GIB, 100 * GIB, None).is_err());
