@@ -66,11 +66,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Reclaim runner disk space
+      - name: Reclaim runner disk space for full builds
+        if: env.RUN_MODE == 'full-build'
         run: |
           set -euo pipefail
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
-          df -h /
+
+      - name: Report runner disk space
+        run: df -h /
 
       - name: Install QEMU boot-test tools
         if: env.RUN_MODE == 'full-build' && env.LIVE_TEST == 'true'
