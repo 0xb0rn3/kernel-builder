@@ -4,7 +4,7 @@
 use crate::{data_dir, gate, resources, Distro, Plan};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 // Shell snippets that tidy the output dir after a build: keep only the version just built and move
 // any superseded older-version artifacts into prev/ (non-destructive rollback). makepkg / bindeb-pkg
@@ -64,6 +64,57 @@ fn step(label: &str, dir: &Path, env: &[(&str, &str)], script: &str) -> io::Resu
     let status = c.status()?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, format!("step failed ({label})")));
+    }
+    Ok(())
+}
+
+/// Fingerprints in the recipe's validpgpkeys=( ... ) that are absent from the invoking user's gpg
+/// keyring. makepkg verifies signatures against that keyring and fails closed, so catching this
+/// before the download step gives the user the exact import command instead of a bare step failure.
+fn missing_pgp_keys(pkgbuild: &Path) -> io::Result<Vec<String>> {
+    let text = std::fs::read_to_string(pkgbuild)?;
+    let Some(start) = text.find("validpgpkeys=(") else { return Ok(Vec::new()) };
+    let body = &text[start..];
+    let body = &body[..body.find(')').unwrap_or(body.len())];
+    let mut missing = Vec::new();
+    for tok in body.split(|c: char| !c.is_ascii_hexdigit()) {
+        if tok.len() != 40 { continue; }
+        let found = Command::new("gpg").args(["--batch", "--list-keys", tok])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status()?.success();
+        if !found { missing.push(tok.to_owned()); }
+    }
+    Ok(missing)
+}
+
+/// CachyOS release-signing fingerprints akt may import on its own (same pair as the CI workflow).
+/// Pinned here so the PGP check stays meaningful: a fingerprint that only appears in the freshly
+/// fetched recipe is never auto-trusted, since a tampered recipe could list its own key.
+const PINNED_PGP_KEYS: [&str; 2] = [
+    "E18447AC260021D31F3FF6C4C8A2A4774B8B63C4", // Eric Naim <dnaim@cachyos.org>
+    "E8B9AA39F054E30E8290D492C3C4820857F654FE", // Peter Jung <admin@ptr1337.dev>
+];
+const PGP_KEYSERVER: &str = "hkps://keyserver.ubuntu.com";
+
+/// Import any missing pinned signing keys by full fingerprint, then confirm they are in the keyring.
+/// Recipe keys that are not pinned are only reported; makepkg still fails closed if one is needed.
+fn ensure_pgp_keys(pkgbuild: &Path) -> io::Result<()> {
+    let missing = missing_pgp_keys(pkgbuild)?;
+    let (pinned, unknown): (Vec<String>, Vec<String>) = missing.into_iter()
+        .partition(|k| PINNED_PGP_KEYS.iter().any(|p| p.eq_ignore_ascii_case(k)));
+    if !pinned.is_empty() {
+        println!(">> importing pinned CachyOS signing keys: {}", pinned.join(" "));
+        let ok = Command::new("gpg").args(["--batch", "--keyserver", PGP_KEYSERVER, "--recv-keys"])
+            .args(&pinned).status()?.success();
+        let still = missing_pgp_keys(pkgbuild)?.into_iter()
+            .any(|k| pinned.iter().any(|p| p.eq_ignore_ascii_case(&k)));
+        if !ok || still {
+            return Err(io::Error::new(io::ErrorKind::Other, format!(
+                "could not import CachyOS signing keys; import them manually, then rerun:\n  gpg --keyserver {PGP_KEYSERVER} --recv-keys {}",
+                pinned.join(" "))));
+        }
+    }
+    if !unknown.is_empty() {
+        eprintln!("akt: warning: recipe lists signing keys that akt does not pin and will not import: {}\n     makepkg fails closed if one of them signed the source.", unknown.join(" "));
     }
     Ok(())
 }
@@ -466,6 +517,7 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
     // 3. extract + prepare. NO --skipinteg: makepkg verifies the recipe's source checksums against
     //    what it downloaded (fail-closed on a tampered/mismatched source), matching the private
     //    linux-arxos builder. `-C` cleans the previous src/pkg for this recipe only.
+    ensure_pgp_keys(&basep.join("PKGBUILD"))?;
     step("[3/5] extract + prepare", basep, &env, "makepkg -o -C --nodeps --noconfirm")?;
     if prepare_only {
         println!("[prepare-only] source downloads and makepkg integrity checks completed; kernel configuration, compilation, and packaging were not run.");
@@ -1092,4 +1144,4 @@ mod tests {
         assert!(blocked, "lock must stay held by the surviving child after the parent guard drops");
         assert!(free_after, "lock must free once the surviving child exits");
     }
-}
+      }
