@@ -142,8 +142,8 @@ pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
     print_plan(&plan);
     if dry {
         let work = work_dir(plan.distro, plan.flavor.key)?;
-        resources::detect(&work)?.report();
-        println!("[dry-run] no build performed. Re-run without --dry-run to build.");
+        resources::detect_dry_run(&work)?.report();
+        println!("[dry-run] no build performed. Resource estimates use actual disk capacity, but the 60 GiB full-build threshold is not enforced for a plan-only run.");
         return Ok(());
     }
     match plan.distro {
