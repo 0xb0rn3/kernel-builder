@@ -67,11 +67,17 @@ akt build --cpu-target portable --max-jobs 4    # portable CPU target + cap norm
 akt build --max-jobs 4 --thinlto-jobs 2          # independently cap ThinLTO backends
 akt build --hz 500 --hugepages madvise          # selectable timer rate and THP default policy
 akt build --source-ref <tag-or-commit>          # pin the Arch/CachyOS recipe source
+
+`--dry-run` is plan-only: it reports actual disk capacity and checks CPU/RAM planning without imposing
+the 60 GiB full-build disk floor. `--prepare-only` is for an Arch-family host and runs the CachyOS
+source download, BLAKE2 checksum checks, and PGP signature verification, then exits before configuration
+or compilation. Neither mode installs a kernel.
 akt build --performance-governor                # opt-in to performance governor as kernel default
 akt build --patch p.patch                       # apply an additional patch; repeatable, fail-fast
 akt build --name mykernel                       # build linux-mykernel instead of linux-arxos
 akt build --flavor rt                           # request the real-time profile (source support is required)
 akt build --dry-run                             # show plan and inspect resources without compiling
+akt build --prepare-only                        # Arch only: fetch sources and verify BLAKE2 + PGP; no compile
 akt rollback                                    # reinstall the previous host kernel package
 akt gate path/to/.config                        # verify the hardening delta
 akt gui                                         # local web GUI at http://127.0.0.1:8787
