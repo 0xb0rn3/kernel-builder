@@ -54,11 +54,33 @@ pub const FLAVORS: &[Flavor] = &[
 ];
 pub fn flavor(key: &str) -> Option<&'static Flavor> { FLAVORS.iter().find(|f| f.key == key) }
 
-/// The bundled tune/patch set that lives beside the binary (install) or in the repo (checkout).
+/// Locate the bundled tune/patch set for standalone bundles, per-user installs, system installs,
+/// and source checkouts. AKT_DATA_DIR is an explicit override; standalone data beside the invoked
+/// binary takes precedence so a local bundle never silently uses unrelated system-wide config.
 pub fn data_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("AKT_DATA_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            if parent.join("config/arxos.fragment").is_file() {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    let user_data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from).map(|p| p.join(".local/share")));
+    if let Some(root) = user_data {
+        let user = root.join("kernel-builder");
+        if user.join("config/arxos.fragment").is_file() {
+            return user;
+        }
+    }
     for p in ["/usr/share/kernel-builder", "/usr/share/arxos-kernel-tuner", env!("CARGO_MANIFEST_DIR")] {
         let pb = PathBuf::from(p);
-        if pb.join("config/arxos.fragment").exists() { return pb; }
+        if pb.join("config/arxos.fragment").is_file() { return pb; }
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
