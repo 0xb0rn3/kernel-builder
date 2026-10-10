@@ -3,6 +3,14 @@ name: Build ARXOS kernel and QEMU boot test
 on:
   workflow_dispatch:
     inputs:
+      test_mode:
+        description: "dry-run validates the plan only; full-build compiles the kernel and can QEMU boot-test it"
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - full-build
+        default: dry-run
       source_ref:
         description: "Optional CachyOS linux-cachyos tag, branch, or commit (blank = rolling latest)"
         required: false
@@ -50,7 +58,8 @@ jobs:
     env:
       SOURCE_REF: ${{ inputs.source_ref || '' }}
       KERNEL_FLAVOR: ${{ inputs.flavor || 'default' }}
-      LIVE_TEST: ${{ inputs.live_test == false && 'false' || 'true' }}
+      RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mode || 'dry-run' }}
+      LIVE_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.live_test || 'false' }}
 
     steps:
       - name: Check out repository
@@ -74,6 +83,7 @@ jobs:
             --workdir /workspace \
             --env SOURCE_REF="$SOURCE_REF" \
             --env KERNEL_FLAVOR="$KERNEL_FLAVOR" \
+            --env RUN_MODE="$RUN_MODE" \
             archlinux:base-devel \
             bash -Eeuo pipefail -c '
               pacman -Syu --noconfirm --needed rust git clang llvm lld bc cpio pahole python sudo zstd
@@ -82,12 +92,13 @@ jobs:
               mkdir -p /workspace/artifacts
               chown -R builder:builder /workspace/artifacts
               args=(build --target-distro arch --flavor "$KERNEL_FLAVOR" --name arxos --max-jobs 2 --thinlto-jobs 1 --cpu-target v2 --hz 500 --hugepages madvise --out /workspace/artifacts)
+              if [[ "$RUN_MODE" == "dry-run" ]]; then args+=(--dry-run); fi
               if [[ -n "$SOURCE_REF" ]]; then args+=(--source-ref "$SOURCE_REF"); fi
               runuser -u builder -- env HOME=/home/builder XDG_CACHE_HOME=/home/builder/.cache AKT_DATA_DIR=/workspace AKT_WORK=/home/builder/.cache/akt AKT_MAX_JOBS=2 AKT_MAX_LTO_JOBS=1 /workspace/target/release/akt "${args[@]}"
             '
 
       - name: Boot the newly built kernel in QEMU
-        if: env.LIVE_TEST == 'true'
+        if: env.RUN_MODE == 'full-build' && env.LIVE_TEST == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -145,8 +156,10 @@ jobs:
       - name: Record build metadata
         if: always()
         run: |
+          chmod -R a+rwX artifacts 2>/dev/null || true
           {
             echo "commit=$GITHUB_SHA"
+            echo "run_mode=$RUN_MODE"
             echo "source_ref=${SOURCE_REF:-rolling-latest}"
             echo "flavor=$KERNEL_FLAVOR"
             echo "qemu_live_test=$LIVE_TEST"
