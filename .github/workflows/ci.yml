@@ -41,34 +41,34 @@ jobs:
           out="$RUNNER_TEMP/kernel-builder-release"
           bash tools/package-release.sh "$out"
           (cd "$out" && sha256sum --check SHA256SUMS)
-          version="$(sed -n 's/^version = "\\([^"]*\\)".*/\\1/p' Cargo.toml | head -n1)"
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
           dpkg-deb --info "$out/kernel-builder_${version}_amd64.deb" >/dev/null
           arch_pkg="$out/kernel-builder-${version}-1-x86_64.pkg.tar.zst"
           tar --zstd -tf "$arch_pkg" | grep -Fx '.PKGINFO'
-          find "$out" -maxdepth 1 -type f -printf '%f %s bytes\\n' | sort
+          find "$out" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
       - name: Smoke-test standalone installer
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/kernel-builder-release"
           smoke="$RUNNER_TEMP/installer-smoke"
           mkdir -p "$smoke/home" "$smoke/data"
-          version="$(sed -n 's/^version = "\\([^"]*\\)".*/\\1/p' Cargo.toml | head -n1)"
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
           tar -xzf "$out/kernel-builder-v${version}-x86_64-linux-musl.tar.gz" -C "$smoke"
-          env HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" USER=ci \\
+          env HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" USER=ci \
             bash "$smoke/kernel-builder/install.sh" --standalone
-          env HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" \\
+          env HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" \
             "$smoke/kernel-builder/akt" --version
       - name: Smoke-test Debian package
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/kernel-builder-release"
-          version="$(sed -n 's/^version = "\\([^"]*\\)".*/\\1/p' Cargo.toml | head -n1)"
-          docker run --rm -v "$out:/release:ro" debian:stable-slim bash -euc \\
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          docker run --rm -v "$out:/release:ro" debian:stable-slim bash -euc \
             "apt-get update >/dev/null && apt-get install -y /release/kernel-builder_${version}_amd64.deb >/dev/null && akt --version && test -f /usr/share/kernel-builder/config/arxos.fragment"
       - name: Smoke-test Arch package
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/kernel-builder-release"
-          version="$(sed -n 's/^version = "\\([^"]*\\)".*/\\1/p' Cargo.toml | head -n1)"
-          docker run --rm -v "$out:/release:ro" archlinux:base bash -euo pipefail -c \\
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          docker run --rm -v "$out:/release:ro" archlinux:base bash -euo pipefail -c \
             "pacman -Sy --noconfirm git make curl tar xz zstd >/dev/null && pacman -U --noconfirm /release/kernel-builder-${version}-1-x86_64.pkg.tar.zst >/dev/null && akt --version && test -f /usr/share/kernel-builder/config/arxos.fragment"
