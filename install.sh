@@ -105,8 +105,8 @@ ensure_rust() {
     echo "No prebuilt akt binary or cargo found, and --no-rust-install was set." >&2
     return 1
   fi
-  if [[ "$(id -u)" -eq 0 && -z "${SUDO_USER:-}" ]]; then
-    echo "Run install.sh as a normal user; it requests sudo only for system-wide file copies." >&2
+  if [[ "$(id -u)" -eq 0 ]]; then
+    echo "Run install.sh as a normal user; it builds Rust and akt without root, then requests sudo only for system-wide file copies." >&2
     return 1
   fi
   if ! ask_yes "No prebuilt binary or cargo found. Install Rust stable under ~/.local/share/akt/toolchain?"; then
@@ -144,6 +144,10 @@ elif [[ -x "$HERE/target/release/akt" ]]; then
   BIN="$HERE/target/release/akt"
   echo ">> using the already-built release binary"
 else
+  if [[ "$(id -u)" -eq 0 ]]; then
+    echo "Do not run a source build as root. Run ./install.sh as your normal user; it will request sudo only if you choose system-wide installation." >&2
+    exit 1
+  fi
   ensure_rust || exit 1
   echo ">> building akt from source (cargo build --release --locked; no root build)"
   (cd "$HERE" && cargo build --release --locked)
