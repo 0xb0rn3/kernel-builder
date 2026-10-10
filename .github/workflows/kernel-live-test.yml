@@ -1,0 +1,164 @@
+name: Build ARXOS kernel and QEMU boot test
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Optional CachyOS linux-cachyos tag, branch, or commit (blank = rolling latest)"
+        required: false
+        type: string
+        default: ""
+      flavor:
+        description: "Kernel profile to build"
+        required: true
+        type: choice
+        options:
+          - default
+          - hardened
+          - rt
+        default: default
+      live_test:
+        description: "Boot the built kernel in QEMU with a minimal initramfs"
+        required: true
+        type: boolean
+        default: true
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/kernel-live-test.yml"
+      - "src/**"
+      - "config/**"
+      - "patches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "install.sh"
+      - "tools/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-live-test-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-boot:
+    name: Build kernel package and boot-test it
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      SOURCE_REF: ${{ inputs.source_ref || '' }}
+      KERNEL_FLAVOR: ${{ inputs.flavor || 'default' }}
+      LIVE_TEST: ${{ inputs.live_test == false && 'false' || 'true' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Free runner disk space and install QEMU
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo apt-get update
+          sudo apt-get install --yes qemu-system-x86 gcc cpio zstd
+          df -h /
+
+      - name: Build the real Arch package with akt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --env SOURCE_REF="$SOURCE_REF" \
+            --env KERNEL_FLAVOR="$KERNEL_FLAVOR" \
+            archlinux:base-devel \
+            bash -Eeuo pipefail -c '
+              pacman -Syu --noconfirm --needed rust git clang llvm lld bc cpio pahole python sudo zstd
+              id builder >/dev/null 2>&1 || useradd --create-home --uid 1000 builder
+              cargo build --release --locked
+              mkdir -p /workspace/artifacts
+              chown -R builder:builder /workspace/artifacts
+              args=(build --target-distro arch --flavor "$KERNEL_FLAVOR" --name arxos --max-jobs 2 --thinlto-jobs 1 --cpu-target v2 --hz 500 --hugepages madvise --out /workspace/artifacts)
+              if [[ -n "$SOURCE_REF" ]]; then args+=(--source-ref "$SOURCE_REF"); fi
+              runuser -u builder -- env HOME=/home/builder XDG_CACHE_HOME=/home/builder/.cache AKT_DATA_DIR=/workspace AKT_WORK=/home/builder/.cache/akt AKT_MAX_JOBS=2 AKT_MAX_LTO_JOBS=1 /workspace/target/release/akt "${args[@]}"
+            '
+
+      - name: Boot the newly built kernel in QEMU
+        if: env.LIVE_TEST == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg=$(find artifacts -maxdepth 1 -type f -name 'linux-arxos-*.pkg.tar.zst' ! -name '*headers*' ! -name '*debug*' -print -quit)
+          test -n "$pkg" || { echo "Kernel package not found in artifacts/" >&2; exit 1; }
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/rootfs/dev"
+          tar --zstd -xf "$pkg" -C "$tmp/rootfs"
+          kernel=$(find "$tmp/rootfs" -type f -path '*/boot/vmlinuz-*' -print -quit)
+          test -n "$kernel" || { echo "No vmlinuz found inside $pkg" >&2; exit 1; }
+          echo "Testing kernel: $kernel"
+
+          cat > "$tmp/init.c" <<'EOF'
+          #define _GNU_SOURCE
+          #include <fcntl.h>
+          #include <linux/reboot.h>
+          #include <stdio.h>
+          #include <sys/reboot.h>
+          #include <unistd.h>
+          int main(void) {
+              int fd = open("/dev/console", O_WRONLY);
+              if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); }
+              puts("AKT_QEMU_BOOT_OK: built kernel executed initramfs /init");
+              fflush(stdout);
+              sync();
+              if (reboot(LINUX_REBOOT_CMD_POWER_OFF) != 0) {
+                  perror("reboot");
+                  for (;;) pause();
+              }
+              return 0;
+          }
+          EOF
+          gcc -static -Os -s -o "$tmp/rootfs/init" "$tmp/init.c"
+          sudo chown root:root "$tmp/rootfs/init"
+          sudo mknod "$tmp/rootfs/dev/console" c 5 1
+          sudo chmod 600 "$tmp/rootfs/dev/console"
+          (cd "$tmp/rootfs" && find . -print0 | sudo cpio --null --create --format=newc --owner=0:0) | gzip -9 > "$tmp/initramfs.cpio.gz"
+
+          set +e
+          timeout 120s qemu-system-x86_64 \
+            -machine accel=tcg -cpu max -m 1024 -smp 2 \
+            -kernel "$kernel" -initrd "$tmp/initramfs.cpio.gz" \
+            -append "console=ttyS0 rdinit=/init panic=10" \
+            -display none -serial stdio -monitor none -no-reboot \
+            2>&1 | tee artifacts/qemu-boot.log
+          qemu_status=${PIPESTATUS[0]}
+          set -e
+          grep -q "AKT_QEMU_BOOT_OK" artifacts/qemu-boot.log || {
+            echo "QEMU did not reach the test init; qemu exit status: $qemu_status" >&2
+            exit 1
+          }
+          echo "PASS: the built kernel booted in QEMU and executed /init."
+
+      - name: Record build metadata
+        if: always()
+        run: |
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "source_ref=${SOURCE_REF:-rolling-latest}"
+            echo "flavor=$KERNEL_FLAVOR"
+            echo "qemu_live_test=$LIVE_TEST"
+            echo "runner=$(uname -a)"
+          } > artifacts/build-metadata.txt
+          find artifacts -maxdepth 1 -type f -printf '%f %s bytes\n' | sort || true
+
+      - name: Upload kernel packages and QEMU log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arxos-kernel-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
