@@ -195,12 +195,30 @@ Each published release provides:
 
 - kernel-builder-vX.Y.Z-x86_64-linux.tar.gz: prebuilt glibc binary plus installer, configuration, patches, GUI, and README.
 - kernel-builder-vX.Y.Z-x86_64-linux-musl.tar.gz: the same bundle with a static musl binary for broader Linux compatibility.
-- Standalone akt-x86_64-linux and akt-x86_64-linux-musl binaries.
-- SHA256SUMS for download integrity checks.
+- Standalone `akt-x86_64-linux` and `akt-x86_64-linux-musl` binaries.
+- Native Debian package: `kernel-builder_VERSION_amd64.deb`.
+- Native Arch package: `kernel-builder-VERSION-1-x86_64.pkg.tar.zst`.
+- `SHA256SUMS` covering every published asset.
 
 The glibc build uses an Ubuntu 22.04 baseline to avoid depending on the newest runner's glibc;
-the static musl binary is the portability fallback. These assets target x86-64 Linux, including
-Arch and Debian. They are not compiled kernel packages.
+the static musl binary is the portability fallback. The native packages install the **builder app**,
+not a custom kernel. You run `akt build` separately to build a kernel for your system.
+
+Install the matching native package after verifying the download against `SHA256SUMS`:
+
+```sh
+# Debian, Ubuntu, Kali
+sha256sum --ignore-missing --check SHA256SUMS
+sudo apt install ./kernel-builder_VERSION_amd64.deb
+
+# Arch, ArxOS, CachyOS
+sha256sum --ignore-missing --check SHA256SUMS
+sudo pacman -U ./kernel-builder-VERSION-1-x86_64.pkg.tar.zst
+```
+
+Replace `VERSION` with the release version. The packages include the CLI, GUI assets, configuration,
+and patch directories; kernel build toolchains remain separate because they are substantial and vary
+by target.
 
 Download the latest published bundle from **[GitHub Releases](https://github.com/0xb0rn3/kernel-builder/releases)**, extract it, and run the installer **as your normal user**:
 
