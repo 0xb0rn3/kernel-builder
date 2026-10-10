@@ -187,78 +187,14 @@ as the CLI. The GUI has no telemetry and uses Google Fonts externally; disable n
 replace the font imports if a fully offline interface is required. Cross-target builds use the same
 Podman/Docker path as the CLI.
 
-## Install
-
-### Prebuilt releases for Arch and Debian-family Linux
-
-The release contains **the kernel-builder application**, not precompiled ArxOS kernel packages. The
-same x86-64 Linux builder works on both Arch-family and Debian-family hosts; the native package path
-is selected automatically, while --target-distro arch and --target-distro debian can choose the
-other package family using Podman/Docker. Kernel packages are built on demand because source,
-configuration, CPU baseline, and hardware/module requirements vary.
-
-Each published release provides:
-
-- kernel-builder-vX.Y.Z-x86_64-linux.tar.gz: prebuilt glibc binary plus installer, configuration, patches, GUI, and README.
-- kernel-builder-vX.Y.Z-x86_64-linux-musl.tar.gz: the same bundle with a static musl binary for broader Linux compatibility.
-- Standalone akt-x86_64-linux and akt-x86_64-linux-musl binaries.
-- SHA256SUMS for download integrity checks.
-
-The glibc build uses an Ubuntu 22.04 baseline to avoid depending on the newest runner's glibc;
-the static musl binary is the portability fallback. These assets target x86-64 Linux, including
-Arch and Debian. They are not compiled kernel packages.
-
-Download the latest published bundle from **[GitHub Releases](https://github.com/0xb0rn3/kernel-builder/releases)**, extract it, and run the installer **as your normal user**:
-
-~~~sh
-tar xzf kernel-builder-vX.Y.Z-x86_64-linux-musl.tar.gz
-cd kernel-builder
-./install.sh
-~~~
-
-The installer asks which mode you want:
-
-~~~sh
-./install.sh --standalone   # keep binary and data beside the bundle; no sudo or PATH changes
-./install.sh --user         # install to ~/.local/bin and ~/.local/share
-./install.sh --system       # install to /usr/local/bin and /usr/share; sudo only for final writes
-~~~
-
-Release bundles already include a compiled binary, so installing from one does **not** require Rust.
-Standalone mode keeps configuration beside the binary. User mode changes only your home directory.
-System mode requests privilege for final file copies; do not run the entire installer through sudo.
-
 ### Install from a source checkout
 
 ~~~sh
 git clone https://github.com/0xb0rn3/kernel-builder
 cd kernel-builder
-./install.sh
+chmod +x install
+./install
 ~~~
-
-If the checkout does not contain a usable akt binary and cargo is missing, the installer asks
-permission to install a minimal stable Rust toolchain using the official rustup installer over
-HTTPS. It places the toolchain under ~/.local/share/akt/toolchain (or your absolute XDG_DATA_HOME)
-and does not modify shell profiles. It then builds with cargo build --release --locked as your normal
-user before installing. Use --no-rust-install to opt out, or --yes for a scripted install that
-accepts the Rust bootstrap prompt.
-
-Native Arch kernel builds need base-devel, Clang/LLVM, LLD, Git, and the build dependencies required
-by the selected CachyOS recipe. Native Debian builds need build-essential, fakeroot, Clang/LLVM/LLD,
-Git, and the usual kernel build dependencies. Cross-target builds need Podman or Docker; the tool
-creates a disposable target container and installs target build dependencies inside it. The first
-cross-target run may download a substantial base image and package set.
-
-### Release automation
-
-A successful push to main publishes prebuilt assets for the current Cargo.toml version if that
-version has no release yet. A matching vX.Y.Z tag also triggers the workflow; a manual run is
-available from **Actions → Build and publish release assets**. The workflow checks the tag/version,
-runs tests, builds glibc and musl binaries, packages the standalone bundles, checks SHA256SUMS, and
-creates the release. Existing release assets are never overwritten. Bump the Cargo version for a
-later release; ordinary pushes after a version is already published do not replace it.
-
-Checksums detect changed downloads; SHA256SUMS is not an independent signature.
 
 ## Adding patches
 
