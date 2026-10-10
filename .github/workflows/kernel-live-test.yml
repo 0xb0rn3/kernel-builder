@@ -96,7 +96,9 @@ jobs:
             archlinux:base-devel \
             bash -Eeuo pipefail -c '
               pacman -Syu --noconfirm --needed rust git clang llvm lld bc cpio pahole python sudo zstd
-              id builder >/dev/null 2>&1 || useradd --create-home --uid 1000 builder
+              if ! getent passwd builder >/dev/null 2>&1; then useradd --create-home builder; fi
+              getent passwd builder
+              install -d -o builder -g builder /home/builder/.cache
               cargo build --release --locked
               mkdir -p /workspace/artifacts
               chown -R builder:builder /workspace/artifacts
