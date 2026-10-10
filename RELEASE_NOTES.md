@@ -1,16 +1,18 @@
-# akt v0.4.0
+# akt v0.4.1
 
 ## Highlights
 
-- Read-only system inventory and machine-specific build recommendations through the CLI and GUI.
-- GUI recommendations and controls for package target, CPU baseline, timer frequency, THP policy, normal compiler jobs, ThinLTO jobs, and source pinning.
-- Arch/Debian package-target selection from supported x86-64 Linux hosts using disposable Podman/Docker containers.
-- User-writable workspaces separated from root-owned installed configuration.
-- Configuration checks that stop before compilation when requested options do not survive Kconfig resolution.
-- Prebuilt glibc and static-musl Linux x86-64 binaries and complete standalone bundles; both support Arch and Debian-family hosts.
-- Interactive installer modes for standalone, per-user, and system-wide installation.
-- A source build can bootstrap a minimal stable Rust toolchain in the user's data directory without editing shell profiles.
-- CachyOS source checksums are synchronized from matching .SRCINFO metadata in the checked-out upstream revision. Source integrity verification stays enabled.
+- Plan-only `akt build --dry-run` checks the resource plan without requiring the 60 GiB full-build disk floor; available disk is still measured and reported.
+- New Arch-only `akt build --prepare-only` fetches the CachyOS recipe and source files, synchronizes the active BLAKE2 checksum array from matching upstream `.SRCINFO` metadata, and runs makepkg source integrity and PGP-signature verification without compiling a kernel.
+- The source-preparation CI workflow imports pinned CachyOS signing-key fingerprints; signature checks are not disabled.
+- GitHub Actions supports a lightweight plan-only dry run, source preparation, or an explicit full kernel build with optional QEMU boot smoke test.
+- Fixed the resource-planning distinction between a lightweight dry run and a real kernel build.
+
+## Validation notes
+
+- Rust compilation and unit tests passed in GitHub Actions for the prepare-only implementation.
+- A source-preparation run verified all five active BLAKE2 entries, including the kernel archive, config, DKMS patch, and BORE patch. CI's subsequent PGP/account setup run still failed before successful completion; a successful final prepare-only run is not yet confirmed.
+- No full kernel package build or QEMU boot test is claimed by these notes. Those remain separate validation steps and require sufficient runner disk space.
 
 ## Important limitations
 
