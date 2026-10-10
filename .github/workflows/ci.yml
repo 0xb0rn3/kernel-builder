@@ -1,4 +1,4 @@
-name: Rust validation
+name: Rust validation and release packaging
 
 on:
   pull_request:
@@ -14,11 +14,59 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-      - name: Install stable Rust
+      - name: Install stable Rust and musl target
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools zstd dpkg-dev
+      - name: Check shell scripts
+        run: |
+          bash -n install.sh
+          bash -n tools/package-release.sh
       - name: Compile
         run: cargo check --locked
       - name: Run unit tests
         run: cargo test --locked
-      - name: Release build
+      - name: Build glibc binary
         run: cargo build --release --locked
+      - name: Build static musl binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Build and validate release assets
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernel-builder-release"
+          bash tools/package-release.sh "$out"
+          (cd "$out" && sha256sum --check SHA256SUMS)
+          dpkg-deb --info "$out/kernel-builder_$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)_amd64.deb" >/dev/null
+          arch_pkg="$out/kernel-builder-$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)-1-x86_64.pkg.tar.zst"
+          tar --zstd -tf "$arch_pkg" | grep -Fx '.PKGINFO'
+          find "$out" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+      - name: Smoke-test standalone installer from portable bundle
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernel-builder-release"
+          smoke="$RUNNER_TEMP/installer-smoke"
+          mkdir -p "$smoke/home" "$smoke/data"
+          tar -xzf "$out/kernel-builder-v$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)-x86_64-linux-musl.tar.gz" -C "$smoke"
+          env HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" USER=ci \
+            bash "$smoke/kernel-builder/install.sh" --standalone
+          env HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" \
+            "$smoke/home/.local/bin/akt" --version
+          test -f "$smoke/data/kernel-builder/config/arxos.fragment"
+      - name: Smoke-test Debian package in Debian container
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernel-builder-release"
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          docker run --rm -v "$out:/release:ro" debian:stable-slim bash -euc \
+            "apt-get update >/dev/null && apt-get install -y /release/kernel-builder_${version}_amd64.deb >/dev/null && akt --version && test -f /usr/share/kernel-builder/config/arxos.fragment"
+      - name: Smoke-test Arch package in Arch container
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernel-builder-release"
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          docker run --rm -v "$out:/release:ro" archlinux:base bash -euo pipefail -c \
+            "pacman -Sy --noconfirm git make curl tar xz zstd >/dev/null && pacman -U --noconfirm /release/kernel-builder-${version}-1-x86_64.pkg.tar.zst >/dev/null && akt --version && test -f /usr/share/kernel-builder/config/arxos.fragment"

@@ -56,9 +56,31 @@ pub fn flavor(key: &str) -> Option<&'static Flavor> { FLAVORS.iter().find(|f| f.
 
 /// The bundled tune/patch set that lives beside the binary (install) or in the repo (checkout).
 pub fn data_dir() -> PathBuf {
+    // A standalone install wrapper sets AKT_DATA_DIR. This takes precedence so a user install
+    // never accidentally reads root-owned system data or a compile-time source checkout.
+    if let Some(path) = std::env::var_os("AKT_DATA_DIR").filter(|v| !v.is_empty()) {
+        let pb = PathBuf::from(path);
+        if pb.join("config/arxos.fragment").is_file() {
+            return pb;
+        }
+    }
+
+    // Honour XDG user data installations when present.
+    let xdg_user_data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+            .map(|home| home.join(".local/share")));
+    if let Some(root) = xdg_user_data {
+        let pb = root.join("kernel-builder");
+        if pb.join("config/arxos.fragment").is_file() {
+            return pb;
+        }
+    }
+
     for p in ["/usr/share/kernel-builder", "/usr/share/arxos-kernel-tuner", env!("CARGO_MANIFEST_DIR")] {
         let pb = PathBuf::from(p);
-        if pb.join("config/arxos.fragment").exists() { return pb; }
+        if pb.join("config/arxos.fragment").is_file() { return pb; }
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
