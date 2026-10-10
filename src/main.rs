@@ -405,16 +405,21 @@ fn main() -> ExitCode {
         }
         "build" => {
             let dry = has_flag(&args, "--dry-run");
+            let prepare_only = has_flag(&args, "--prepare-only");
+            if prepare_only && (dry || target_distro != Distro::Arch || host_distro != Distro::Arch) {
+                eprintln!("akt: --prepare-only requires an Arch-family host and Arch target, and cannot be combined with --dry-run");
+                return ExitCode::FAILURE;
+            }
             let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
                 .with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_max_jobs(max_jobs)
                 .with_thinlto_jobs(thinlto_jobs)
                 .with_source_ref(source_ref.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
-            let result = if target_distro != host_distro && !dry {
+            let result = if target_distro != host_distro && !dry && !prepare_only {
                 container_build::run(&plan, &args, host_distro)
             } else {
-                build::run(plan, dry)
+                build::run(plan, dry, prepare_only)
             };
             match result {
                 Ok(_) => ExitCode::SUCCESS,
@@ -461,7 +466,7 @@ fn usage() -> String {
   build  [--target-distro host|arch|debian] [--cpu-target auto|portable|v1|v2|v3|v4]
          [--hz HZ] [--hugepages madvise|always] [--max-jobs auto|N]
          [--thinlto-jobs auto|N] [--source-ref REF] [--performance-governor]
-         [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run]
+         [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run | --prepare-only]
                          build a kernel package; cross-distro builds use Podman/Docker
                          --name / --rename  builds linux-<NAME> (default: arxos)
                          --target-distro    host (default), arch, or debian; cross-target needs Podman/Docker
