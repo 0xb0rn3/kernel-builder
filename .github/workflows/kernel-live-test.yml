@@ -100,6 +100,10 @@ jobs:
               cargo build --release --locked
               mkdir -p /workspace/artifacts
               chown -R builder:builder /workspace/artifacts
+              chmod 777 /workspace/artifacts
+              # Fetch CachyOS signing keys by full fingerprint. The PKGBUILD's validpgpkeys
+              # remains the trust anchor; no PGP checks are skipped.
+              runuser -u builder -- env HOME=/home/builder gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys E18447AC260021D31F3FF6C4C8A2A4774B8B63C4 E8B9AA39F054E30E8290D492C3C4820857F654FE
               args=(build --target-distro arch --flavor "$KERNEL_FLAVOR" --name arxos --max-jobs 2 --thinlto-jobs 1 --cpu-target v2 --hz 500 --hugepages madvise --out /workspace/artifacts)
               if [[ "$RUN_MODE" == "dry-run" ]]; then args+=(--dry-run); fi
               if [[ "$RUN_MODE" == "prepare-only" ]]; then args+=(--prepare-only); fi
