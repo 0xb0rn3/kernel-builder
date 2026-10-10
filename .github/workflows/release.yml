@@ -64,6 +64,16 @@ jobs:
             echo "Will publish $actual from commit $GITHUB_SHA."
           fi
 
+      - name: Synchronize notes for an existing current-version release
+        if: steps.release_guard.outputs.publish == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_guard.outputs.tag_name }}"
+          echo "Updating notes for existing $tag; its release assets will not be modified."
+          gh release edit "$tag" --title "akt $tag" --notes-file RELEASE_NOTES.md
+
       - name: Run unit tests
         if: steps.release_guard.outputs.publish == 'true'
         run: cargo test --locked
