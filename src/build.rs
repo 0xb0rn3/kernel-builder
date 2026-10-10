@@ -135,9 +135,15 @@ pub fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
         .join(format!("{}-{flavor}", distro.name())))
 }
 
-pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
+pub fn run(plan: Plan, dry: bool, prepare_only: bool) -> io::Result<()> {
     if plan.distro == Distro::Unknown {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported host (need Arch- or Debian-family)"));
+    }
+    if dry && prepare_only {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose either --dry-run or --prepare-only, not both"));
+    }
+    if prepare_only && plan.distro != Distro::Arch {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch/CachyOS recipe"));
     }
     print_plan(&plan);
     if dry {
@@ -147,7 +153,8 @@ pub fn run(plan: Plan, dry: bool) -> io::Result<()> {
         return Ok(());
     }
     match plan.distro {
-        Distro::Arch => build_arch(&plan),
+        Distro::Arch => build_arch(&plan, prepare_only),
+        Distro::Debian if prepare_only => Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch/CachyOS recipe")),
         Distro::Debian => build_debian(&plan),
         Distro::Unknown => unreachable!(),
     }
@@ -407,14 +414,14 @@ fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level:
     Ok(())
 }
 
-fn build_arch(p: &Plan) -> io::Result<()> {
+fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
     let dd = data_dir();
     let work = work_dir(Distro::Arch, p.flavor.key)?.display().to_string();
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
     let _lock = acquire_build_lock(workp)?;   // cross-process (CLI+GUI) lock; held until this returns
     let frag = dd.join("config/arxos.fragment");
-    let initial = resources::detect(workp)?;
+    let initial = if prepare_only { resources::detect_dry_run(workp)? } else { resources::detect(workp)? };
     initial.report();
     let jobs = initial.jobs.to_string();
 
@@ -460,6 +467,10 @@ fn build_arch(p: &Plan) -> io::Result<()> {
     //    what it downloaded (fail-closed on a tampered/mismatched source), matching the private
     //    linux-arxos builder. `-C` cleans the previous src/pkg for this recipe only.
     step("[3/5] extract + prepare", basep, &env, "makepkg -o -C --nodeps --noconfirm")?;
+    if prepare_only {
+        println!("[prepare-only] source downloads and makepkg integrity checks completed; kernel configuration, compilation, and packaging were not run.");
+        return Ok(());
+    }
 
     // 4. overlay ARXOS config + patches, RE-ASSERT + HARD-VERIFY the delta (fail-fast).
     let kdir = find_kdir(basep).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "kernel source dir not found under src/"))?;
