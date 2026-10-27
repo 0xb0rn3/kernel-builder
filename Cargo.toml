@@ -2,7 +2,7 @@
 name = "arxos-kernel-tuner"
 version = "0.4.1"
 edition = "2021"
-description = "Cross-distro kernel tuner: CachyOS tunes + ARXOS hardening patches on Arch and Debian, with a GUI."
+description = "Cross-distro kernel tuner: tuned upstream source + ARXOS hardening patches on Arch and Debian, with a GUI."
 license = "GPL-3.0-or-later"
 repository = "https://github.com/0xb0rn3/kernel-builder"
 

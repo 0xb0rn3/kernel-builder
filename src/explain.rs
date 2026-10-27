@@ -4,7 +4,7 @@ use crate::{Distro, Flavor};
 
 pub struct Item { pub key: &'static str, pub what: &'static str }
 
-/// The tuned performance base (from CachyOS), applied to every flavor.
+/// The tuned performance base, applied to every flavor.
 pub const PERF: &[Item] = &[
     Item { key: "BORE scheduler", what: "Burst-Oriented Response Enhancer: a CPU scheduler tuned for desktop responsiveness under load (snappier UI, faster interactive tasks)." },
     Item { key: "Clang ThinLTO", what: "Whole-kernel link-time optimization: smaller, faster code. Heavier to build, faster at runtime. Disabled on the RT flavor (RT and LTO do not mix)." },

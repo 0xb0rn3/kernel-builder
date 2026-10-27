@@ -82,7 +82,7 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
   <header>
     <div>
       <h1>ARXOS Kernel Tuner</h1>
-      <div class="sub">CachyOS tunes + ARXOS hardening on Arch &amp; Debian</div>
+      <div class="sub">Tuned upstream source + ARXOS hardening on Arch &amp; Debian</div>
     </div>
     <div class="sub" id="ver">akt</div>
   </header>
@@ -186,7 +186,7 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
       </label>
       <label>Arch recipe source ref
         <input id="sourceRef" class="tin" type="text" placeholder="blank = rolling latest" spellcheck="false" autocomplete="off">
-        <span class="hint">Optional CachyOS recipe tag, branch or commit. Debian source version is managed by apt.</span>
+        <span class="hint">Optional source recipe tag, branch or commit. Debian source version is managed by apt.</span>
       </label>
       <label>Transparent huge pages
         <select id="thp" class="tin">
@@ -309,7 +309,7 @@ function refreshTargetPath(){
   const effective=target==='host'?hostDistro:target;
   const supported=effective==='arch'||effective==='debian';
   $('#path').textContent = !supported ? 'unsupported host; select Arch or Debian target' :
-    (target==='host' ? (hostDistro==='arch'?'native CachyOS fork → pacman pkg':'native Debian source → .deb') :
+    (target==='host' ? (hostDistro==='arch'?'native source fork \u2192 pacman pkg':'native Debian source \u2192 .deb') :
     (target===hostDistro?'native '+target+' package':'containerized '+target+' package'));
   $('#buildBtn').disabled=!supported;
   $('#buildBtn').style.opacity=supported?1:.5;
@@ -397,7 +397,7 @@ $('#applyRecommended').addEventListener('click',()=>{
   if(!lastSystemInfo){ $('#systemState').textContent='Hardware inventory unavailable; refresh hardware before applying recommendations.'; return; }
   cpuTarget=lastSystemInfo.recommended_cpu_target||'portable';
   const effectiveTarget=target==='host'?hostDistro:target;
-  // CachyOS supports additional intermediate HZ rates; Debian source usually exposes the standard Kconfig choices.
+  // The upstream source supports additional intermediate HZ rates; Debian usually exposes the standard Kconfig choices.
   hz=lastSystemInfo.battery_percent!==null ? (effectiveTarget==='arch'?'500':'250') : '1000';
   hugepages='madvise';
   performanceGovernor=false;

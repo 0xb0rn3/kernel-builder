@@ -86,11 +86,13 @@ fn missing_pgp_keys(pkgbuild: &Path) -> io::Result<Vec<String>> {
     Ok(missing)
 }
 
-/// CachyOS release-signing fingerprints akt may import on its own (same pair as the CI workflow).
+/// Upstream release-signing fingerprints akt may import on its own (same pair as the CI workflow).
+/// The fingerprints themselves are the trust anchor: pinning these exact values is what makes the
+/// signature check meaningful, and they are reproduced verbatim so an auditor can compare them.
 /// Pinned here so the PGP check stays meaningful: a fingerprint that only appears in the freshly
 /// fetched recipe is never auto-trusted, since a tampered recipe could list its own key.
 const PINNED_PGP_KEYS: [&str; 2] = [
-    "E18447AC260021D31F3FF6C4C8A2A4774B8B63C4", // Eric Naim <dnaim@cachyos.org>
+    "E18447AC260021D31F3FF6C4C8A2A4774B8B63C4",
     "E8B9AA39F054E30E8290D492C3C4820857F654FE", // Peter Jung <admin@ptr1337.dev>
 ];
 const PGP_KEYSERVER: &str = "hkps://keyserver.ubuntu.com";
@@ -102,14 +104,14 @@ fn ensure_pgp_keys(pkgbuild: &Path) -> io::Result<()> {
     let (pinned, unknown): (Vec<String>, Vec<String>) = missing.into_iter()
         .partition(|k| PINNED_PGP_KEYS.iter().any(|p| p.eq_ignore_ascii_case(k)));
     if !pinned.is_empty() {
-        println!(">> importing pinned CachyOS signing keys: {}", pinned.join(" "));
+        println!(">> importing pinned upstream signing keys: {}", pinned.join(" "));
         let ok = Command::new("gpg").args(["--batch", "--keyserver", PGP_KEYSERVER, "--recv-keys"])
             .args(&pinned).status()?.success();
         let still = missing_pgp_keys(pkgbuild)?.into_iter()
             .any(|k| pinned.iter().any(|p| p.eq_ignore_ascii_case(&k)));
         if !ok || still {
             return Err(io::Error::new(io::ErrorKind::Other, format!(
-                "could not import CachyOS signing keys; import them manually, then rerun:\n  gpg --keyserver {PGP_KEYSERVER} --recv-keys {}",
+                "could not import the pinned upstream signing keys; import them manually, then rerun:\n  gpg --keyserver {PGP_KEYSERVER} --recv-keys {}",
                 pinned.join(" "))));
         }
     }
@@ -194,7 +196,7 @@ pub fn run(plan: Plan, dry: bool, prepare_only: bool) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose either --dry-run or --prepare-only, not both"));
     }
     if prepare_only && plan.distro != Distro::Arch {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch/CachyOS recipe"));
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch source recipe"));
     }
     print_plan(&plan);
     if dry {
@@ -205,7 +207,7 @@ pub fn run(plan: Plan, dry: bool, prepare_only: bool) -> io::Result<()> {
     }
     match plan.distro {
         Distro::Arch => build_arch(&plan, prepare_only),
-        Distro::Debian if prepare_only => Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch/CachyOS recipe")),
+        Distro::Debian if prepare_only => Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch source recipe")),
         Distro::Debian => build_debian(&plan),
         Distro::Unknown => unreachable!(),
     }
@@ -226,9 +228,9 @@ fn cpu_processor_opt(target: &str, work: &Path) -> io::Result<String> {
     Ok(format!("GENERIC_V{}", cpu_target_level(target, work)?))
 }
 
-// Upstream linux-cachyos PKGBUILD revision 59f65f1 adds scheduler patches to
+// Upstream PKGBUILD revision 59f65f1 adds scheduler patches to
 // \`source\` conditionally but omits their checksums from the generic recipe's \`b2sums\`.
-// These hashes are copied from CachyOS's matching variant .SRCINFO files for the SAME
+// These hashes are copied from the matching upstream variant .SRCINFO files for the SAME
 // recipe commit. Keep this narrowly pinned: if the recipe or patch changes, fail closed.
 #[derive(Default)]
 struct SrcInfo {
@@ -264,7 +266,7 @@ fn valid_b2sum(value: &str) -> bool {
 }
 
 /// Lookup a source's BLAKE2 checksum from a generated .SRCINFO belonging to the exact same
-/// CachyOS package version. This deliberately reads version-controlled metadata in the checked-out
+/// upstream package version. This deliberately reads version-controlled metadata in the checked-out
 /// recipe commit; it never trusts a newly downloaded patch's own digest as its expected checksum.
 fn checksum_in_srcinfo(
     text: &str,
@@ -324,12 +326,12 @@ fn srcinfo_checksum(
         [] => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "no matching source checksum found in CachyOS .SRCINFO metadata for {source} (package {pkgver}-{pkgrel}); refusing to skip integrity checks"
+                "no matching source checksum found in upstream .SRCINFO metadata for {source} (package {pkgver}-{pkgrel}); refusing to skip integrity checks"
             ),
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("CachyOS .SRCINFO files disagree on the checksum for {source}; refusing to choose one"),
+            format!("upstream .SRCINFO files disagree on the checksum for {source}; refusing to choose one"),
         )),
     }
 }
@@ -364,12 +366,12 @@ fn active_srcinfo(pkgbuild_dir: &Path, env: &[(&str, &str)]) -> io::Result<SrcIn
 
 fn replace_b2sums_array(original: &str, sums: &[String]) -> io::Result<String> {
     let start = original.find("b2sums=(").ok_or_else(|| io::Error::new(
-        io::ErrorKind::InvalidData, "CachyOS PKGBUILD has no b2sums array",
+        io::ErrorKind::InvalidData, "the upstream PKGBUILD has no b2sums array",
     ))?;
     if original.contains("b2sums+=(") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "CachyOS PKGBUILD uses an additional b2sums+= array; refusing to rewrite unknown checksum logic",
+            "the upstream PKGBUILD uses an additional b2sums+= array; refusing to rewrite unknown checksum logic",
         ));
     }
     let array_end = original[start..].find(')').map(|n| start + n)
@@ -377,7 +379,7 @@ fn replace_b2sums_array(original: &str, sums: &[String]) -> io::Result<String> {
     let mut replacement = String::from("b2sums=(\n");
     for sum in sums {
         if !valid_b2sum(sum) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid checksum in selected CachyOS metadata"));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid checksum in the selected upstream metadata"));
         }
         replacement.push_str("    '");
         replacement.push_str(sum);
@@ -392,9 +394,9 @@ fn replace_b2sums_array(original: &str, sums: &[String]) -> io::Result<String> {
 }
 
 /// Rebuild b2sums directly from the source URLs resolved by makepkg and the versioned .SRCINFO
-/// metadata shipped alongside this exact CachyOS recipe commit. This automatically follows upstream
+/// metadata shipped alongside this exact upstream recipe commit. This automatically follows upstream
 /// source and checksum changes while preserving makepkg's verification; unknown sources fail closed.
-fn sync_cachyos_b2sums(pkgbuild: &Path, repo_root: &Path, env: &[(&str, &str)]) -> io::Result<()> {
+fn sync_upstream_b2sums(pkgbuild: &Path, repo_root: &Path, env: &[(&str, &str)]) -> io::Result<()> {
     let original = std::fs::read_to_string(pkgbuild)?;
     let active = active_srcinfo(pkgbuild.parent().unwrap_or(repo_root), env)?;
     let pkgver = active.pkgver.as_deref().unwrap_or("");
@@ -410,17 +412,17 @@ fn sync_cachyos_b2sums(pkgbuild: &Path, repo_root: &Path, env: &[(&str, &str)]) 
         )?);
     }
     if active.sources.len() != sums.len() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "source/checksum count mismatch after CachyOS metadata sync"));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "source/checksum count mismatch after upstream metadata sync"));
     }
     let updated = replace_b2sums_array(&original, &sums)?;
     if updated != original {
         std::fs::write(pkgbuild, updated)?;
         println!(
-            "akt: synchronized {} BLAKE2 entries from matching CachyOS .SRCINFO metadata; makepkg integrity verification remains enabled.",
+            "akt: synchronized {} BLAKE2 entries from matching upstream .SRCINFO metadata; makepkg integrity verification remains enabled.",
             sums.len()
         );
     } else {
-        println!("akt: CachyOS BLAKE2 metadata already matches the checked-out source revision.");
+        println!("akt: upstream BLAKE2 metadata already matches the checked-out source revision.");
     }
     Ok(())
 }
@@ -456,7 +458,7 @@ fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level:
     }
     if p.distro == Distro::Arch && matches!(p.flavor.sched, "bore" | "rt-bore" | "hardened")
         && !has("CONFIG_SCHED_BORE=y") {
-        return Err(fail("CONFIG_SCHED_BORE=y (selected CachyOS scheduler)"));
+        return Err(fail("CONFIG_SCHED_BORE=y (selected scheduler)"));
     }
     if p.distro == Distro::Debian && text.contains("CONFIG_SCHED_BORE")
         && !has("CONFIG_SCHED_BORE=y") {
@@ -476,9 +478,9 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
     initial.report();
     let jobs = initial.jobs.to_string();
 
-    // 1. fetch the CachyOS recipe. A specified source ref is checked out detached and never pulled forward.
+    // 1. fetch the upstream recipe. A specified source ref is checked out detached and never pulled forward.
     let requested_ref = p.source_ref.as_deref().unwrap_or("");
-    step("[1/5] fetch CachyOS linux-cachyos", workp, &[("ARXOS_SOURCE_REF", requested_ref)],
+    step("[1/5] fetch the kernel source", workp, &[("ARXOS_SOURCE_REF", requested_ref)],
         "set -e; if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; fi; \
          git -C cos checkout -- linux-cachyos/PKGBUILD; \
          if [ -n \"$ARXOS_SOURCE_REF\" ]; then \
@@ -490,7 +492,7 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
     let basep = Path::new(&base);
     let revision = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(basep).output()?;
     if !revision.status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "cannot identify the CachyOS recipe revision"));
+        return Err(io::Error::new(io::ErrorKind::Other, "cannot identify the upstream recipe revision"));
     }
     let source_revision = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
     println!("source revision: {source_revision}");
@@ -507,7 +509,7 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
         ("ARXOS_BUILD_JOBS", jobs.as_str()),
     ];
     resources::limit_recipe(&basep.join("PKGBUILD"))?;
-    sync_cachyos_b2sums(&basep.join("PKGBUILD"), basep.parent().unwrap_or(basep), &env)?;
+    sync_upstream_b2sums(&basep.join("PKGBUILD"), basep.parent().unwrap_or(basep), &env)?;
 
     // 2. de-brand + pkgrel (matches linux-arxos build.sh).
     step(&format!("[2/5] de-brand recipe -> linux-{}", p.kname), basep, &env,
@@ -735,7 +737,7 @@ pub fn rollback(p: &Plan) -> io::Result<()> {
 
     let rd = std::fs::read_dir(&prev).map_err(|_| {
         io::Error::new(io::ErrorKind::NotFound,
-            format!("no archived packages in {} (nothing to roll back to)", prev.display()))
+            format!("no archived packages in {} (nothing to roll back to)", crate::display_path(&prev.display().to_string())))
     })?;
     let mut kernels: Vec<(String, std::path::PathBuf)> = vec![]; // (pkgver, path)
     let mut headers: Vec<(String, std::path::PathBuf)> = vec![];
@@ -749,7 +751,7 @@ pub fn rollback(p: &Plan) -> io::Result<()> {
     }
     if kernels.is_empty() {
         return Err(io::Error::new(io::ErrorKind::NotFound,
-            format!("no archived {} package in {} (nothing to roll back to)", kpkg, prev.display())));
+            format!("no archived {} package in {} (nothing to roll back to)", kpkg, crate::display_path(&prev.display().to_string()))));
     }
     // Pick the highest-version archived kernel, failing closed if any pair can't be compared.
     let mut best = kernels[0].clone();
@@ -810,7 +812,7 @@ fn build_debian(p: &Plan) -> io::Result<()> {
     let srcp = Path::new(&src);
     println!("Debian kernel source tree: {}", srcp.display());
 
-    // 2. start from the running kernel's config, then overlay CachyOS-style tunes + the ARXOS delta.
+    // 2. start from the running kernel's config, then overlay the upstream tunes + the ARXOS delta.
     step("[2/6] seed config from the running kernel", srcp, &[],
         "cp -f /boot/config-$(uname -r) .config 2>/dev/null || make defconfig")?;
     let cpu_level = cpu_target_level(&p.cpu_target, workp)?;

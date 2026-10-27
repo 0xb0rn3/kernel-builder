@@ -5,8 +5,8 @@
 ## Highlights
 
 - 🧪 **`akt build --dry-run`** is plan-only. It checks the resource plan without requiring the 60 GiB full-build disk floor; available disk is still measured and reported.
-- 🔎 **`akt build --prepare-only`** (Arch only) fetches the CachyOS recipe and source files, synchronizes the active BLAKE2 checksum array from matching upstream `.SRCINFO` metadata, and runs `makepkg` source integrity and PGP-signature verification without compiling a kernel.
-- 🔑 The source-preparation CI workflow imports pinned CachyOS signing-key fingerprints. Signature checks are not disabled.
+- 🔎 **`akt build --prepare-only`** (Arch only) fetches the upstream recipe and source files, synchronizes the active BLAKE2 checksum array from matching upstream `.SRCINFO` metadata, and runs `makepkg` source integrity and PGP-signature verification without compiling a kernel.
+- 🔑 The source-preparation CI workflow imports pinned upstream signing-key fingerprints. Signature checks are not disabled.
 - ⚙️ GitHub Actions can run a lightweight plan-only dry run, source preparation, or an explicit full kernel build with an optional QEMU boot smoke test.
 - 🐛 Fixed the resource-planning distinction between a lightweight dry run and a real kernel build.
 
@@ -41,6 +41,6 @@ Release bundles ship a compiled binary, so no Rust toolchain is needed to instal
 
 - This release is the kernel builder, not a prebuilt ArxOS kernel. Generated kernel packages depend on configuration, selected source, and hardware/module needs.
 - Kernel performance depends on workload and hardware; recommendations are conservative starting points, not benchmark claims or hardware-safety guarantees.
-- Arch/CachyOS and Debian kernel recipes have different feature availability. A missing BORE, BBRv3, LTO, real-time, or hardening option must not be treated as enabled unless the selected source verifies it.
+- Arch and Debian kernel recipes have different feature availability. A missing BORE, BBRv3, LTO, real-time, or hardening option must not be treated as enabled unless the selected source verifies it.
 - Cross-target builds need Podman or Docker and network access to obtain the target image and build dependencies.
 - `SHA256SUMS` detects changed downloads but is not an independent signature.

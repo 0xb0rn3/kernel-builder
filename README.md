@@ -30,8 +30,8 @@
 | 🔍 **Hardware-aware** | Reads CPU flags, RAM, cgroup limits, free disk, thermal sensors, CPU-frequency policy and battery state. Anything the machine does not expose is reported as *unknown*, never guessed. |
 | 🧮 **Resource-aware builds** | Sizes `make` and ThinLTO parallelism from CPUs, available RAM, cgroup v2 limits and disk, so a build does not take the machine down. |
 | 🚦 **Config gate** | Re-asserts the hardening options after `olddefconfig` and hard-verifies them in `.config`. A missing option aborts in seconds, not after a multi-hour compile. |
-| 🔐 **Supply-chain posture** | Pinned CachyOS signing-key fingerprints, BLAKE2 checksums derived from upstream `.SRCINFO`, strict patch application, optional `SHA256SUMS` for patch sets. `makepkg` integrity checks are never skipped. |
-| 📦 **Both package families** | Arch builds a `pacman` package from the CachyOS `linux-cachyos` recipe. Debian builds `.deb` image and header packages from Debian kernel source. |
+| 🔐 **Supply-chain posture** | Pinned upstream signing-key fingerprints, BLAKE2 checksums derived from upstream `.SRCINFO`, strict patch application, optional `SHA256SUMS` for patch sets. `makepkg` integrity checks are never skipped. |
+| 📦 **Both package families** | Arch builds a `pacman` package from the tuned upstream recipe. Debian builds `.deb` image and header packages from Debian kernel source. |
 | 🐳 **Cross-target builds** | Build the other family's package in a disposable Podman or Docker container, without installing its toolchain on your host. |
 | 🖥️ **Local GUI** | Loopback-only web UI with a live build log, driven by the same engine as the CLI. No telemetry. |
 | ⏪ **Rollback** | Each build archives the package it supersedes into `prev/`. `akt rollback` reinstalls it (Arch path). |
@@ -86,7 +86,7 @@ Prefer a window to a terminal? Run `akt gui`.
 flowchart LR
     A["akt system<br/>hardware inventory"] --> B["akt plan or<br/>build --dry-run"]
     B --> C{"target<br/>distro"}
-    C -->|Arch| D["CachyOS linux-cachyos<br/>recipe + makepkg"]
+    C -->|Arch| D["tuned upstream recipe<br/>+ makepkg"]
     C -->|Debian| E["Debian linux-source<br/>+ bindeb-pkg"]
     D --> F["patches, then the<br/>ARXOS Kconfig overlay"]
     E --> F
@@ -103,9 +103,9 @@ flowchart LR
 
 | Stage | Arch family | Debian family |
 |---|---|---|
-| **Source** | Clone or fast-forward `CachyOS/linux-cachyos`. With `--source-ref`, fetch and check out that ref detached; it is never pulled forward. | `sudo apt-get install linux-source` plus build dependencies, then extract the source tarball. |
-| **Preparation** | Cap the recipe's `nproc` jobs, rebuild the PKGBUILD `b2sums` from matching `.SRCINFO`, import any missing **pinned** CachyOS signing keys, then `makepkg -o` downloads and verifies sources. `--prepare-only` stops here. | Seed `.config` from `/boot/config-$(uname -r)` (falls back to `make defconfig`). |
-| **Tuning** | CachyOS PKGBUILD variables: `_cpusched`, `_use_llvm_lto`, `_HZ_ticks`, `_processor_opt`, `_hugepage`, `_per_gov`, `_use_kcfi`, `_tcp_bbr3`, `_preempt`. | `scripts/config` sets HZ, BBR, THP, MGLRU, the x86-64 level, governor, and LTO / PREEMPT_RT / kCFI where the source supports them. BORE is enabled only if the source contains it. |
+| **Source** | Clone or fast-forward the upstream recipe. With `--source-ref`, fetch and check out that ref detached; it is never pulled forward. | `sudo apt-get install linux-source` plus build dependencies, then extract the source tarball. |
+| **Preparation** | Cap the recipe's `nproc` jobs, rebuild the PKGBUILD `b2sums` from matching `.SRCINFO`, import any missing **pinned** upstream signing keys, then `makepkg -o` downloads and verifies sources. `--prepare-only` stops here. | Seed `.config` from `/boot/config-$(uname -r)` (falls back to `make defconfig`). |
+| **Tuning** | upstream PKGBUILD variables: `_cpusched`, `_use_llvm_lto`, `_HZ_ticks`, `_processor_opt`, `_hugepage`, `_per_gov`, `_use_kcfi`, `_tcp_bbr3`, `_preempt`. | `scripts/config` sets HZ, BBR, THP, MGLRU, the x86-64 level, governor, and LTO / PREEMPT_RT / kCFI where the source supports them. BORE is enabled only if the source contains it. |
 | **Patches** | Bundled `patches/arxos/`, then your `--patch` inputs. Integrity check first, then apply. | Bundled `patches/arxos/` and `patches/kali/`, then your `--patch` inputs. |
 | **Overlay and gate** | Merge `config/arxos.fragment`, `olddefconfig`, re-assert the hardening options, then verify the gate and the requested tuning. | Same. |
 | **Compile** | Re-detect resources, cap ThinLTO backends in the kernel Makefile, `makepkg -e -f`. | `make bindeb-pkg` (with `LLVM=1` for ThinLTO flavors). |
@@ -165,7 +165,7 @@ Neither `--dry-run` nor `--prepare-only` installs a kernel. A dry run reports th
 |---|---|---|---|
 | `default` | BORE | Clang ThinLTO | Balanced daily driver. |
 | `rt` | BORE with PREEMPT_RT | none | Real-time. RT and LTO do not mix. Source support is required. |
-| `hardened` | CachyOS hardened | Clang ThinLTO | Highest security posture: KSPP-style options plus kCFI. Requires a source whose config supports kCFI; Debian aborts if it does not. |
+| `hardened` | upstream hardened | Clang ThinLTO | Highest security posture: KSPP-style options plus kCFI. Requires a source whose config supports kCFI; Debian aborts if it does not. |
 
 On the Arch target every flavor must resolve `CONFIG_SCHED_BORE=y`. On Debian, BORE is enabled only if the source already carries it, and any requested feature the source cannot provide fails verification rather than being reported as present.
 
@@ -198,7 +198,7 @@ Beyond the gate, the build also verifies the tuning you asked for: `CONFIG_HZ`, 
 
 <br>
 
-The overlay deliberately does **not** set the CachyOS performance knobs (BORE, ThinLTO, BBRv3, tick rate, preempt model, x86-64 level, MGLRU, THP). Setting them through `merge_config` would override CachyOS. It adds only what the base does not guarantee.
+The overlay deliberately does **not** set the upstream performance knobs (BORE, ThinLTO, BBRv3, tick rate, preempt model, x86-64 level, MGLRU, THP). Setting them through `merge_config` would override upstream. It adds only what the base does not guarantee.
 
 | Area | What it requests |
 |---|---|
@@ -374,7 +374,7 @@ A native **Debian** build runs `sudo apt-get install` itself (`linux-source`, `b
 
 Data directory lookup order: `AKT_DATA_DIR`, the directory beside the binary, `$XDG_DATA_HOME/kernel-builder` (or `~/.local/share/kernel-builder`), `/usr/share/kernel-builder`, `/usr/share/arxos-kernel-tuner`, then the source checkout. A local bundle therefore never silently picks up unrelated system-wide config.
 
-Distro detection reads `/etc/os-release`: `arxos`, `arch` or `cachyos` map to the Arch path; `debian`, `ubuntu` or `kali` map to the Debian path. Anything else is unsupported.
+Distro detection reads `/etc/os-release`: `arxos`, `arch` or `upstream` map to the Arch path; `debian`, `ubuntu` or `kali` map to the Debian path. Anything else is unsupported.
 
 </details>
 
@@ -440,8 +440,8 @@ The helper refuses an existing output directory and packages only explicit runti
 
 - **Development tool.** The repository includes a full-build and QEMU workflow, but this documentation does not claim a passing end-to-end Arch or Debian package build and boot for the current feature set. Source-specific Kconfig support, container permissions, package contents, installer behavior and runtime boot still need your own testing.
 - **Recommendations are advisory.** They are conservative starting points, not benchmark claims or hardware-safety guarantees. Benchmark against a known kernel on your workload.
-- **Debian source differs from CachyOS.** It does not ship BORE or BBRv3 patches by default. Requested features the source cannot provide fail verification instead of being reported as enabled.
-- **A rolling Arch source moves.** Pin a reviewed tag or commit with `--source-ref` for repeatable inputs. The CachyOS tree is what `akt` reports back as the exact source revision.
+- **Debian source differs from upstream.** It does not ship BORE or BBRv3 patches by default. Requested features the source cannot provide fail verification instead of being reported as enabled.
+- **A rolling Arch source moves.** Pin a reviewed tag or commit with `--source-ref` for repeatable inputs. The upstream tree is what `akt` reports back as the exact source revision.
 - **Resource detection is a snapshot,** not an out-of-memory guarantee or a thermal controller.
 - **x86-64 Linux only.** Release assets, the container builder and ISA detection all assume it.
 - **The GUI's trust boundary is the local machine.** See [Security model](#local-gui).

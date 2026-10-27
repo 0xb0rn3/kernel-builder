@@ -1,9 +1,9 @@
 // akt — the ARXOS Kernel Tuner.
 //
-// It applies the CachyOS performance base + the ARXOS hardening / DEATHSTROKE config delta (and, for
+// It applies the upstream performance base + the ARXOS hardening config delta (and, for
 // Debian users, Kali-style wireless-injection patches) and builds a tuned kernel on either:
-//   * Arch    — fork the CachyOS `linux-cachyos` recipe, overlay the ARXOS config + patches, makepkg
-//   * Debian  — take the Debian kernel source, apply CachyOS tunes + the ARXOS config + Kali patches,
+//   * Arch    - fork the upstream performance recipe, overlay the ARXOS config + patches, makepkg
+//   * Debian  - take the Debian kernel source, apply the upstream tunes + the ARXOS config + Kali patches,
 //               and build a set of `.deb` packages.
 // A local web GUI drives the same core. See README.md.
 mod build;
@@ -100,7 +100,7 @@ pub struct Plan {
     pub performance_governor: bool, // opt-in; off by default for laptops
     pub max_jobs: Option<usize>, // optional cap, further clamped by resource planner
     pub thinlto_jobs: Option<usize>, // optional independent ThinLTO backend cap
-    pub source_ref: Option<String>, // pinned CachyOS recipe ref for Arch builds
+    pub source_ref: Option<String>, // pinned upstream recipe ref for Arch builds
     pub base: String,          // upstream base we fork/patch
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
@@ -120,9 +120,9 @@ impl Plan {
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
                 cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
                 extra_patches: vec![], patch_strict: true,
-                base: "CachyOS linux-cachyos (rolling latest)".into(),
+                base: format!("{UPSTREAM} (rolling latest)"),
                 tunes: vec![
-                    format!("CachyOS knobs: scheduler={}, LTO={}, CPU target=auto, HZ=1000, THP=madvise, performance governor=off", fl.sched, fl.lto),
+                    format!("source knobs: scheduler={}, LTO={}, CPU target=auto, HZ=1000, THP=madvise, performance governor=off", fl.sched, fl.lto),
                 ],
                 overlays: vec![arxos_frag],
                 patch_sets: vec![dd.join("patches/arxos").display().to_string()],
@@ -171,7 +171,7 @@ impl Plan {
             let hugepages = self.hugepages.clone();
             let pgov = if self.performance_governor { "on (opt-in)" } else { "off" };
             let line = match self.distro {
-                Distro::Arch => format!("CachyOS knobs: scheduler={sched}, LTO={lto}, CPU baseline={target}, HZ={hz}, THP={hugepages}, performance governor={pgov}"),
+                Distro::Arch => format!("source knobs: scheduler={sched}, LTO={lto}, CPU baseline={target}, HZ={hz}, THP={hugepages}, performance governor={pgov}"),
                 Distro::Debian => format!("Debian Kconfig: CPU target={target}, HZ={hz}, THP={hugepages}, performance governor={pgov}; unavailable options must fail verification"),
                 Distro::Unknown => String::new(),
             };
@@ -232,6 +232,19 @@ impl Plan {
 /// produced unparseable responses the moment a multi-line one appeared: a build log, a gate report,
 /// the output of an install. The browser's own r.json() fails the same way, so the live log would
 /// simply never update and nothing would say why.
+/// How the upstream base is named in anything a user sees. ArxOS does not advertise which
+/// distribution's recipe it forks on any user-facing surface, so every label, log line and error
+/// message goes through this rather than hard-coding a vendor name. The clone URL necessarily still
+/// resolves to that project, which is accepted: this is about not putting a third party's name in
+/// front of our users, not about concealing where the code comes from from anyone who looks.
+pub const UPSTREAM: &str = "tuned upstream kernel source";
+
+/// Neutralise an internal path for display. The working checkout keeps the upstream directory names
+/// because the recipe depends on them; what gets PRINTED should not carry the vendor name.
+pub fn display_path(p: &str) -> String {
+    p.replace("cos/linux-cachyos", "source").replace("/cos/", "/source/")
+}
+
 pub fn json_escape(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 16);
     for c in s.chars() {
@@ -264,7 +277,7 @@ mod json_escape_tests {
     #[test]
     fn a_build_log_round_trips_through_a_json_string() {
         // The exact shape that used to break: a multi-line log embedded in a JSON object.
-        let log = "== akt build ==\n  base : CachyOS\n  tune : \"quoted\"\n";
+        let log = "== akt build ==\n  base : tuned upstream source\n  tune : \"quoted\"\n";
         let doc = format!("{{\"data\":\"{}\"}}", json_escape(log));
         assert!(!doc.contains('\n'), "no raw newline may survive inside the JSON string");
         assert!(doc.starts_with("{\"data\":\""), "doc = {doc}");
@@ -353,7 +366,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         if target_distro != Distro::Arch {
-            eprintln!("akt: --source-ref applies to the Arch/CachyOS recipe; Debian chooses its source package version");
+            eprintln!("akt: --source-ref applies to the Arch source recipe; Debian chooses its source package version");
             return ExitCode::FAILURE;
         }
     }
@@ -385,8 +398,8 @@ fn main() -> ExitCode {
             else {
                 println!("host distro : {}", d.name());
                 println!("build path  : {}", match d {
-                    Distro::Arch => "Arch — fork CachyOS + overlay ARXOS config/patches -> pacman package",
-                    Distro::Debian => "Debian — Debian source + CachyOS tunes + ARXOS + Kali patches -> .deb",
+                    Distro::Arch => "Arch: fork the tuned upstream source + overlay ARXOS config/patches -> pacman package",
+                    Distro::Debian => "Debian: Debian source + ArxOS tunes + ARXOS + Kali patches -> .deb",
                     Distro::Unknown => "unsupported (need an Arch-family or Debian-family host)",
                 });
             }
@@ -528,7 +541,7 @@ fn usage() -> String {
                          --hugepages        madvise (default) or always
                          --max-jobs         auto lets the planner decide; N caps jobs and is further resource-limited
                          --thinlto-jobs     auto or independent ThinLTO link-backend cap
-                         --source-ref       pin the Arch/CachyOS recipe to a tag, branch, or commit; default tracks rolling source
+                         --source-ref       pin the Arch source recipe to a tag, branch, or commit; default tracks rolling source
                          --performance-governor opt in to the performance governor default (not recommended for most laptops)
                          --pkgrel N         package revision / custom version (default: 1)
                          --out DIR          write the finished packages to DIR

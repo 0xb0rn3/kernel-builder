@@ -176,7 +176,7 @@ fn install_arch(p: &Plan, keep_running: bool) -> io::Result<()> {
 
     let Some((kver, kpath)) = newest_in(&outdir, &kpkg)? else {
         return Err(io::Error::new(io::ErrorKind::NotFound,
-            format!("no {kpkg} package in {} — build one first", outdir.display())));
+            format!("no {kpkg} package in {} - build one first", crate::display_path(&outdir.display().to_string()))));
     };
     println!("installing {} {}", kpkg, kver);
     println!("  kernel : {}", kpath.display());
@@ -269,7 +269,7 @@ fn install_debian(p: &Plan, keep_running: bool) -> io::Result<()> {
     let debs: Vec<PathBuf> = debs.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect();
     if debs.is_empty() {
         return Err(io::Error::new(io::ErrorKind::NotFound,
-            format!("no linux-image .deb for {} in {} — build one first", p.kname, outdir.display())));
+            format!("no linux-image .deb for {} in {} - build one first", p.kname, crate::display_path(&outdir.display().to_string()))));
     }
     for d in &debs { println!("  package: {}", d.display()); }
 
