@@ -63,10 +63,19 @@ fn cpu_flags() -> BTreeSet<String> {
 fn x86_64_level(flags: &BTreeSet<String>) -> u8 {
     if !cfg!(target_arch = "x86_64") { return 0; }
     const V2: &[&str] = &["cx16", "lahf_lm", "popcnt", "pni", "sse4_1", "sse4_2", "ssse3"];
-    const V3: &[&str] = &["avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "xsave"];
+    // x86-64-v3 requires LZCNT, but Linux does NOT print an "lzcnt" flag in /proc/cpuinfo: it
+    // prints "abm" (Advanced Bit Manipulation), the feature bit that carries LZCNT. Requiring the
+    // literal "lzcnt" therefore never matched on any real Linux host, so every v3-capable machine
+    // silently fell back to v2 and got an under-optimised kernel. Each entry here is a set of
+    // acceptable spellings, satisfied when ANY of them is present.
+    const V3: &[&[&str]] = &[
+        &["avx"], &["avx2"], &["bmi1"], &["bmi2"], &["f16c"], &["fma"],
+        &["lzcnt", "abm"], // same capability, different names across sources
+        &["movbe"], &["xsave"],
+    ];
     const V4: &[&str] = &["avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"];
     if !V2.iter().all(|f| flags.contains(*f)) { return 1; }
-    if !V3.iter().all(|f| flags.contains(*f)) { return 2; }
+    if !V3.iter().all(|alts| alts.iter().any(|f| flags.contains(*f))) { return 2; }
     if !V4.iter().all(|f| flags.contains(*f)) { return 3; }
     4
 }
@@ -387,6 +396,11 @@ mod tests {
         let mut v3 = v2.clone();
         for v in ["avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "xsave"] { v3.insert(v.to_string()); }
         assert_eq!(x86_64_level(&v3), 3);
+        // THE REGRESSION. Real Linux reports "abm", never "lzcnt". Taken verbatim from an
+        // i7-8665U whose glibc reports x86-64-v3 supported; this used to come back as 2.
+        let mut real = v2.clone();
+        for v in ["avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "abm", "movbe", "xsave"] { real.insert(v.to_string()); }
+        assert_eq!(x86_64_level(&real), 3, "Linux prints abm, not lzcnt: v3 must still be detected");
         let mut v4 = v3.clone();
         for v in ["avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"] { v4.insert(v.to_string()); }
         assert_eq!(x86_64_level(&v4), 4);
