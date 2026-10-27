@@ -62,7 +62,7 @@ h1{font-family:var(--disp);font-style:italic;font-weight:700;font-size:2rem;marg
 .opts3 .tin{width:100%}
 .opts3 .hint{font-family:var(--sans);font-size:12px;text-transform:none;letter-spacing:0;color:var(--muted)}
 .opts3 .hint b{color:var(--accent-hi);font-weight:600}
-pre.log{background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:14px;margin:0;max-height:340px;overflow:auto;font-family:var(--mono);font-size:12px;color:#cfd2c8;white-space:pre-wrap;word-break:break-word}
+pre.log{background:#0b0c10;border:1px solid var(--line);border-radius:12px;padding:14px;margin:0;height:min(62vh,760px);min-height:260px;resize:vertical;overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;color:#cfd2c8;white-space:pre-wrap;word-break:break-word}.logbar{display:flex;align-items:center;gap:12px;margin:14px 0 6px;font-size:12px;color:var(--dim)}.logbar .grow{flex:1}.logbar label{display:flex;align-items:center;gap:6px;margin:0}
 .muted{color:var(--muted)}.dim{color:var(--dim)}
 footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
 .warn{margin-top:10px;font-size:12.5px;color:#ffd7b0}
@@ -200,6 +200,24 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
         Default to performance CPU governor
       </label>
       <span class="hint">Off by default to avoid forcing a battery-unfriendly policy.</span>
+        <label>Extra patches
+          <textarea id="patchList" class="tin" rows="3" spellcheck="false" autocomplete="off"
+            placeholder="one path per line: a .patch/.diff file, or a directory of them"></textarea>
+          <span class="hint">Applied after the bundled patches, in the order given. Symlinked inputs are
+          refused, and a SHA256SUMS file in a patch directory is verified before anything is applied.</span>
+        </label>
+        <label class="toggle">
+          <input id="patchOptional" type="checkbox">
+          Skip patches that do not apply
+        </label>
+        <span class="hint">Off means strict: a patch that fails to apply aborts the build, so a kernel is
+        never silently shipped without a change you asked for.</span>
+        <label class="toggle">
+          <input id="prepareOnly" type="checkbox">
+          Prepare only, do not compile
+        </label>
+        <span class="hint">Fetches, patches and configures, then stops before compiling so you can
+        inspect the tree.</span>
     </div>
     <div class="warn" id="optErr" hidden></div>
     <div class="smallnote" id="targetNote">Package type and tune availability are verified against the selected build source before compilation.</div>
@@ -234,11 +252,19 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
   <div class="card">
     <h2>Build</h2>
     <div class="row">
+      <label class="toggle" style="margin:0 10px 0 0"><input id="keepRunning" type="checkbox" checked> Keep the running kernel as a fallback</label>
+      <button class="btn ghost" id="resBtn">Resource limits</button>
+      <button class="btn ghost" id="patBtn">Patches to apply</button>
+      <button class="btn ghost" id="gateBtn">Verify a .config</button>
+      <button class="btn ghost" id="rbBtn">Roll back kernel</button>
       <button class="btn ghost" id="dryBtn">Dry run</button>
       <button class="btn primary" id="buildBtn">Build tuned kernel</button>
+      <button class="btn primary" id="instBtn">Install in system</button>
       <span class="dim" id="buildstate"></span>
     </div>
     <div class="warn">The build is long (ThinLTO). Boot-test the result in a throwaway VM before installing on real hardware.</div>
+    <pre class="log" id="toolOut" style="margin-top:14px" hidden></pre>
+    <div class="logbar" id="logBar" hidden><span id="logState">idle</span><span class="grow"></span><span id="logBytes">0 lines</span><label><input id="logFollow" type="checkbox" checked> Follow</label><button class="btn ghost" id="logCopy" type="button">Copy</button></div>
     <pre class="log" id="log" style="margin-top:14px" hidden></pre>
   </div>
 
@@ -251,6 +277,8 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11.5px;color:var(--dim)
 <script>
 const $=s=>document.querySelector(s);
 let flavor='default', kname='arxos', pkgrel='', outpath='', poll=null;
+let patchList='', patchOptional=false, prepareOnly=false;
+let logOffset=0;
 let target='host', cpuTarget='auto', hz='1000', hugepages='madvise', maxJobs='auto', thinltoJobs='auto', sourceRef='', performanceGovernor=false;
 let lastSystemInfo=null;
 let hostDistro='unknown', hostSupported=false;
@@ -262,6 +290,9 @@ function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>f
 async function jget(u){ try{ const r=await fetch(u); return r.ok?r.json():null; }catch(e){ return null; } }
 function qs(){
   let q='flavor='+enc(flavor)+'&name='+enc(kname)+'&target='+enc(target)+'&cpu='+enc(cpuTarget)+'&hz='+enc(hz)+'&thp='+enc(hugepages)+'&maxjobs='+enc(maxJobs)+'&ltojobs='+enc(thinltoJobs)+'&source='+enc(sourceRef)+'&pgov='+(performanceGovernor?'1':'0');
+  if(patchList) q+='&patch='+enc(patchList);
+  if(patchOptional) q+='&patchopt=1';
+  if(prepareOnly) q+='&prepare=1';
   if(pkgrel) q+='&pkgrel='+enc(pkgrel);
   if(outpath) q+='&out='+enc(outpath);
   return q;
@@ -396,19 +427,91 @@ $('#outpath').addEventListener('input', debounce(()=>{ outpath=$('#outpath').val
 async function startBuild(dry){
   $('#buildstate').textContent = dry?'dry run…':'building…';
   $('#log').hidden=false;
-  const aktTok=(document.querySelector('meta[name=akt-token]')||{}).content||'';
+  const aktTok=aktToken();
   const r=await fetch('/api/build?'+qs()+(dry?'&dry=1':''),{method:'POST',headers:{'X-Akt-Token':aktTok}});
   const j=await r.json().catch(()=>({started:false}));
   if(!j.started){ $('#buildstate').textContent='could not start: '+(j.error||'error'); return; }
-  if(poll) clearInterval(poll);
-  poll=setInterval(async()=>{
-    const t=await fetch('/api/log').then(r=>r.text()).catch(()=>'');
-    const el=$('#log'); const atBottom = el.scrollHeight-el.scrollTop-el.clientHeight < 40;
-    el.textContent=t; if(atBottom) el.scrollTop=el.scrollHeight;
-    if(/Done\.|build failed|config verification FAILED|no build performed|target package artifacts are in|Install with:/.test(t)){ clearInterval(poll); $('#buildstate').textContent='finished'; }
-  },1500);
+  followLog();
 }
 $('#buildBtn').addEventListener('click',()=>startBuild(false));
+$('#instBtn').addEventListener('click',async()=>{
+  const keep=$('#keepRunning').checked;
+  const msg=keep
+    ? 'Install the built kernel into THIS system?\n\nThe kernel you are running will be made restorable first, and put back automatically if the install removes it.'
+    : 'Install WITHOUT keeping the running kernel?\n\nOn Arch a same-version install removes the running kernel\u2019s modules and nothing will put them back. Boot-test in a throwaway VM first.';
+  if(!confirm(msg)) return;
+  $('#buildstate').textContent='installing\u2026';
+  $('#log').hidden=false; $('#logBar').hidden=false; logOffset=0; $('#log').textContent='';
+  const r=await fetch('/api/install?name='+enc(kname)+'&target='+enc(target)+'&keep='+(keep?'1':'0')+(outpath?'&out='+enc(outpath):''),
+    {method:'POST',headers:{'X-Akt-Token':aktToken()}});
+  const j=await r.json().catch(()=>({started:false}));
+  if(!j.started){ $('#buildstate').textContent='could not start: '+(j.error||'error'); return; }
+  followLog();
+});
+
+// Parity with the CLI. These inputs and the four buttons below cover what used to be reachable only
+// from a terminal: staging a patch, non-strict patching, stopping at prepare, and the resources,
+// patches, gate and rollback commands.
+$('#patchList').addEventListener('input',e=>{ patchList=e.target.value.trim(); plan(); });
+$('#patchOptional').addEventListener('change',e=>{ patchOptional=e.target.checked; plan(); });
+$('#prepareOnly').addEventListener('change',e=>{ prepareOnly=e.target.checked; });
+
+// One accessor for the per-run token. It used to be a const inside startBuild, which left my
+// rollback handler referencing an out-of-scope name.
+$('#logCopy')&&$('#logCopy').addEventListener('click',()=>{
+  navigator.clipboard&&navigator.clipboard.writeText($('#log').textContent);
+  $('#logState').textContent='copied the full log';
+});
+// One live-log follower, used by both a build and an install. It reads FROM an offset so the whole
+// run accumulates in the window instead of re-fetching a bounded tail, which used to drop the plan
+// and the resource decisions printed at the start of a long build.
+function followLog(){
+  if(poll) clearInterval(poll);
+  logOffset=0; $('#log').textContent=''; $('#log').hidden=false; $('#logBar').hidden=false;
+  $('#logState').textContent='following';
+  poll=setInterval(async()=>{
+    const j=await fetch('/api/log?from='+logOffset).then(r=>r.json()).catch(()=>null);
+    if(j && typeof j.next==='number'){
+      if(j.data){
+        const el=$('#log');
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        el.textContent += j.data;
+        if($('#logFollow').checked || atBottom) el.scrollTop = el.scrollHeight;
+        $('#logBytes').textContent = el.textContent.split('\n').length.toLocaleString()+' lines \u00b7 '+
+          (j.total/1024).toFixed(0)+' KiB';
+      }
+      logOffset=j.next;
+    }
+    const t=$('#log').textContent;
+    if(/Done\.|build failed|config verification FAILED|no build performed|target package artifacts are in|Install with:|installed linux-|install failed|is still installed and bootable/.test(t)){
+      clearInterval(poll); poll=null;
+      $('#buildstate').textContent='finished';
+      $('#logState').textContent='complete';
+    }
+  },1200);
+}
+function aktToken(){ return (document.querySelector('meta[name=akt-token]')||{}).content||''; }
+function showTool(text){ const t=$('#toolOut'); t.hidden=false; t.textContent=text; }
+async function tool(label, url, opts){
+  showTool(label+'\u2026');
+  try{
+    const r=await fetch(url, opts||{});
+    const txt=await r.text();
+    let out=txt;
+    try{ out=JSON.stringify(JSON.parse(txt),null,2); }catch(e){}
+    showTool(label+'\n\n'+out);
+  }catch(e){ showTool(label+'\n\nrequest failed: '+e); }
+}
+$('#resBtn').addEventListener('click',()=>tool('Resource limits the planner will allow','/api/resources'));
+$('#patBtn').addEventListener('click',()=>tool('Patches that will be applied, in order','/api/patches?'+qs()));
+$('#gateBtn').addEventListener('click',()=>{
+  const f=prompt('Path to a built .config to verify against the ARXOS hardening delta:');
+  if(f) tool('Hardening gate for '+f,'/api/gate?file='+enc(f));
+});
+$('#rbBtn').addEventListener('click',()=>{
+  if(!confirm('Reinstall the previous linux-'+kname+' package from prev/?\n\nA same-name upgrade removes the old version\u2019s modules, so this retained package is the reliable rollback. Boot-test in a throwaway first.')) return;
+  tool('Rollback of linux-'+kname,'/api/rollback?name='+enc(kname),{method:'POST',headers:{'X-Akt-Token':aktToken()}});
+});
 $('#dryBtn').addEventListener('click',()=>startBuild(true));
 detect(); refresh(); loadSystem();
 </script>

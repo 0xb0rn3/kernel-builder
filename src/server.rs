@@ -17,7 +17,7 @@
 // blind same-machine POSTs. It does NOT defend against another local user who can read the served
 // page or the process memory: on a shared machine, anyone who can reach the loopback port and read
 // the page can obtain the token. The real boundary for local users is OS access control on the host.
-use crate::{flavor, Distro, Plan, FLAVORS};
+use crate::{build, flavor, json_escape, resources, Distro, Plan, FLAVORS};
 use std::io::{BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -121,6 +121,32 @@ fn read_log_tail() -> std::io::Result<String> {
     let mut buf = Vec::with_capacity(MAX_LOG_BYTES.min(len as usize));
     (&mut f).take(MAX_LOG_BYTES as u64).read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Read the log FROM a byte offset, so a caller can follow the whole build instead of re-fetching a
+/// tail. The tail reader above can only ever show the last MAX_LOG_BYTES, which silently truncates a
+/// long kernel build: the beginning of the log, where the plan and the resource decisions are
+/// printed, had already scrolled out of reach. Returns (chunk, next_offset, total_len). A caller
+/// that has fallen more than MAX_LOG_BYTES behind is resynchronised to the tail rather than served a
+/// gap it cannot detect.
+fn read_log_from(from: u64) -> std::io::Result<(String, u64, u64)> {
+    let p = log_path();
+    validate_private_parent(&p)?;
+    let mut f = std::fs::OpenOptions::new().read(true)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK).open(&p)?;
+    assert_regular(&f)?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    // A truncated or rotated log (len < from) restarts the caller from the beginning.
+    let mut start = if from > len { 0 } else { from };
+    if len.saturating_sub(start) > MAX_LOG_BYTES as u64 {
+        start = len - MAX_LOG_BYTES as u64;
+    }
+    use std::io::Seek;
+    f.seek(std::io::SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    (&mut f).take(MAX_LOG_BYTES as u64).read_to_end(&mut buf)?;
+    let next = start + buf.len() as u64;
+    Ok((String::from_utf8_lossy(&buf).into_owned(), next, len))
 }
 
 pub fn serve(port: u16) -> std::io::Result<()> {
@@ -357,6 +383,15 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
             let outq = q("out").filter(|s| !s.is_empty());
             let rel = q("pkgrel").filter(|s| !s.is_empty());
             let dry = q("dry").as_deref() == Some("1");
+            // Parity with the CLI. These three were reachable only from a terminal, so a GUI user
+            // could not stage a patch, keep a build at the prepare stage, or choose non-strict
+            // patching. --patch takes host paths and the CLI is what validates them (it copies the
+            // inputs in and refuses symlinks); the server only passes them through.
+            let prepare = q("prepare").as_deref() == Some("1");
+            let patch_optional = q("patchopt").as_deref() == Some("1");
+            let patches: Vec<String> = q("patch")
+                .map(|v| v.split('\n').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+                .unwrap_or_default();
             let exe = std::env::current_exe().unwrap_or_default();
             match open_log() {
                 Ok(out) => {
@@ -376,6 +411,9 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
                     if let Some(o) = &outq { c.arg("--out").arg(o); }
                     if let Some(r) = &rel { c.arg("--pkgrel").arg(r); }
                     if dry { c.arg("--dry-run"); }
+                    if prepare { c.arg("--prepare-only"); }
+                    if patch_optional { c.arg("--patch-optional"); }
+                    for pt in &patches { c.arg("--patch").arg(pt); }
                     c.stdout(Stdio::from(out)).stderr(Stdio::from(err));
                     match c.spawn() {
                         Ok(child) => { *build = Some(child); json(&mut s, "{\"started\":true}") }
@@ -385,10 +423,110 @@ fn handle(mut s: TcpStream, port: u16, token: &str, build: &mut Option<Child>) -
                 Err(e) => json(&mut s, &format!("{{\"started\":false,\"error\":\"{}\"}}", crate::json_escape(&e.to_string()))),
             }
         }
+        // Parity with the CLI: `akt resources`, `akt patches`, `akt gate` and `akt rollback` were
+        // terminal-only, so the GUI could not show what the planner will allow, what patches are
+        // about to be applied, whether a built config still carries the hardening delta, or roll a
+        // kernel back. All four reuse the same code paths the CLI uses.
+        ("GET", "/api/resources") => {
+            let work = std::env::var("AKT_WORK").unwrap_or_else(|_| ".".into());
+            match resources::detect(Path::new(&work)) {
+                Ok(r) => json(&mut s, &r.json()),
+                Err(e) => json(&mut s, &format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()))),
+            }
+        }
+        ("GET", "/api/patches") => {
+            let fl = q("flavor").unwrap_or_else(|| "default".into());
+            let target = q("target").unwrap_or_else(|| "host".into());
+            let extra: Vec<String> = q("patch")
+                .map(|v| v.split('\n').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+                .unwrap_or_default();
+            let strict = q("patchopt").as_deref() != Some("1");
+            let host = Distro::detect();
+            let d = Distro::parse_target(&target, host).unwrap_or(host);
+            let flv = flavor(&fl).unwrap_or(&FLAVORS[0]);
+            let p = Plan::resolve(d, flv, "arxos", None, "1").with_patches(extra, strict);
+            let (files, _dirs) = build::collect_patches(&build::bundled_patch_dirs(p.distro), &p.extra_patches);
+            let arr: Vec<String> = files.iter().map(|f| format!("\"{}\"", json_escape(f))).collect();
+            json(&mut s, &format!("{{\"patches\":[{}],\"strict\":{}}}", arr.join(","), p.patch_strict))
+        }
+        ("GET", "/api/gate") => {
+            match q("file").filter(|v| !v.is_empty()) {
+                None => json(&mut s, "{\"error\":\"no config file given\"}"),
+                Some(f) => {
+                    let exe = std::env::current_exe().unwrap_or_default();
+                    match Command::new(exe).arg("gate").arg(&f).arg("--json").output() {
+                        Ok(o) if !o.stdout.is_empty() => {
+                            respond(&mut s, "200 OK", "application/json", &o.stdout)
+                        }
+                        Ok(o) => json(&mut s, &format!("{{\"ok\":{},\"output\":\"{}\"}}",
+                            o.status.success(), json_escape(&String::from_utf8_lossy(&o.stderr)))),
+                        Err(e) => json(&mut s, &format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()))),
+                    }
+                }
+            }
+        }
+        // Rollback reinstalls a package, so it carries the same token requirement as a build and is
+        // never reachable by a bare GET.
+        ("POST", "/api/rollback") => {
+            if !ct_eq(&req_token, token) {
+                return respond(&mut s, "403 Forbidden", "text/plain", b"missing or bad build token");
+            }
+            if !build_free(build) {
+                return json(&mut s, "{\"ok\":false,\"error\":\"a build is running\"}");
+            }
+            let name = q("name").unwrap_or_else(|| "arxos".into());
+            let exe = std::env::current_exe().unwrap_or_default();
+            match Command::new(exe).arg("rollback").arg("--name").arg(&name).output() {
+                Ok(o) => json(&mut s, &format!("{{\"ok\":{},\"output\":\"{}\"}}", o.status.success(),
+                    json_escape(&format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))))),
+                Err(e) => json(&mut s, &format!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(&e.to_string()))),
+            }
+        }
+        // Installing writes to the same log the GUI already follows, so the live window shows the
+        // install exactly as it shows a build. Token-protected and blocked while a build runs.
+        ("POST", "/api/install") => {
+            if !ct_eq(&req_token, token) {
+                return respond(&mut s, "403 Forbidden", "text/plain", b"missing or bad build token");
+            }
+            if !build_free(build) {
+                return json(&mut s, "{\"started\":false,\"error\":\"a build is running\"}");
+            }
+            let name = q("name").unwrap_or_else(|| "arxos".into());
+            let target = q("target").unwrap_or_else(|| "host".into());
+            let keep = q("keep").as_deref() != Some("0");
+            let outq = q("out").filter(|v| !v.is_empty());
+            let exe = std::env::current_exe().unwrap_or_default();
+            match open_log() {
+                Ok(out) => {
+                    let err = out.try_clone()?;
+                    let mut c = Command::new(exe);
+                    c.arg("install").arg("--name").arg(&name).arg("--target-distro").arg(&target);
+                    if let Some(o) = &outq { c.arg("--out").arg(o); }
+                    if !keep { c.arg("--no-keep-running"); }
+                    c.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+                    match c.spawn() {
+                        Ok(child) => { *build = Some(child); json(&mut s, "{\"started\":true}") }
+                        Err(e) => json(&mut s, &format!("{{\"started\":false,\"error\":\"{}\"}}", json_escape(&e.to_string()))),
+                    }
+                }
+                Err(e) => json(&mut s, &format!("{{\"started\":false,\"error\":\"{}\"}}", json_escape(&e.to_string()))),
+            }
+        }
         ("GET", "/api/log") => {
-            // Bounded read of the tail (see read_log_tail): O_NOFOLLOW + private parent + regular file.
-            let body = read_log_tail().unwrap_or_default();
-            respond(&mut s, "200 OK", "text/plain; charset=utf-8", body.as_bytes())
+            // With ?from=N the caller follows the log incrementally and sees the WHOLE build; with no
+            // offset it keeps the original bounded-tail behaviour so nothing that polled it breaks.
+            match q("from").and_then(|v| v.parse::<u64>().ok()) {
+                Some(from) => match read_log_from(from) {
+                    Ok((chunk, next, total)) => json(&mut s, &format!(
+                        "{{\"from\":{},\"next\":{},\"total\":{},\"data\":\"{}\"}}",
+                        from, next, total, json_escape(&chunk))),
+                    Err(e) => json(&mut s, &format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()))),
+                },
+                None => {
+                    let body = read_log_tail().unwrap_or_default();
+                    respond(&mut s, "200 OK", "text/plain; charset=utf-8", body.as_bytes())
+                }
+            }
         }
         _ => respond(&mut s, "404 Not Found", "text/plain", b"not found"),
     }

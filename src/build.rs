@@ -579,7 +579,7 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
 /// Read pkgname + pkgver from a package's .PKGINFO. argv-based (path passed as an OS arg, never
 /// through a shell) so spaces/metacharacters in the path are safe. Returns None if not a readable
 /// package. Identity comes from metadata, NOT the filename.
-fn pkg_identity(pkg: &Path) -> Option<(String, String)> {
+pub(crate) fn pkg_identity(pkg: &Path) -> Option<(String, String)> {
     let out = Command::new("bsdtar").arg("-xOf").arg(pkg).arg(".PKGINFO").output().ok()?;
     if !out.status.success() { return None; }
     let text = String::from_utf8_lossy(&out.stdout);
@@ -595,7 +595,7 @@ fn pkg_identity(pkg: &Path) -> Option<(String, String)> {
 /// 7.9 < 7.10 where a byte compare would disagree). FAIL-CLOSED: if vercmp is missing, exits non-zero,
 /// or prints anything but -1/0/1, return an error rather than guessing — a wrong comparison here could
 /// install the wrong kernel. Never falls back to a byte compare.
-fn vercmp(a: &str, b: &str) -> io::Result<std::cmp::Ordering> {
+pub(crate) fn vercmp(a: &str, b: &str) -> io::Result<std::cmp::Ordering> {
     use std::cmp::Ordering;
     let out = match Command::new("vercmp").arg(a).arg(b).output() {
         Ok(out) => out,

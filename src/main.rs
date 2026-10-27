@@ -9,6 +9,7 @@
 mod build;
 mod explain;
 mod gate;
+mod install;
 mod server;
 mod resources;
 mod sysinfo;
@@ -225,7 +226,50 @@ impl Plan {
     }
 }
 
-pub fn json_escape(s: &str) -> String { s.replace('\\', "\\\\").replace('"', "\\\"") }
+/// Escape a string for a JSON string literal. Control characters MUST be escaped: a raw newline
+/// inside a JSON string is invalid JSON, and every consumer rejects it. This only escaped the
+/// backslash and the quote, which was survivable while every value was a single line, and silently
+/// produced unparseable responses the moment a multi-line one appeared: a build log, a gate report,
+/// the output of an install. The browser's own r.json() fails the same way, so the live log would
+/// simply never update and nothing would say why.
+pub fn json_escape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '\\' => o.push_str("\\\\"),
+            '"' => o.push_str("\\\""),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            '\u{08}' => o.push_str("\\b"),
+            '\u{0c}' => o.push_str("\\f"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o
+}
+
+#[cfg(test)]
+mod json_escape_tests {
+    use super::json_escape;
+    #[test]
+    fn control_characters_are_escaped_so_multiline_values_stay_valid_json() {
+        assert_eq!(json_escape("a\nb"), "a\\nb");
+        assert_eq!(json_escape("a\tb\r"), "a\\tb\\r");
+        assert_eq!(json_escape("say \"hi\""), "say \\\"hi\\\"");
+        assert_eq!(json_escape("c:\\path"), "c:\\\\path");
+        assert_eq!(json_escape("\u{1}"), "\\u0001");
+    }
+    #[test]
+    fn a_build_log_round_trips_through_a_json_string() {
+        // The exact shape that used to break: a multi-line log embedded in a JSON object.
+        let log = "== akt build ==\n  base : CachyOS\n  tune : \"quoted\"\n";
+        let doc = format!("{{\"data\":\"{}\"}}", json_escape(log));
+        assert!(!doc.contains('\n'), "no raw newline may survive inside the JSON string");
+        assert!(doc.starts_with("{\"data\":\""), "doc = {doc}");
+    }
+}
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
@@ -426,6 +470,15 @@ fn main() -> ExitCode {
                 Err(e) => { eprintln!("akt: build failed: {e}"); ExitCode::FAILURE }
             }
         }
+        "install" => {
+            // Installs into the RUNNING system, so the running kernel is made restorable first.
+            let keep = !args.iter().any(|a| a == "--no-keep-running");
+            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel);
+            match install::install_to_system(&plan, keep) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => { eprintln!("akt: install failed: {e}"); ExitCode::FAILURE }
+            }
+        }
         "rollback" => {
             if target_distro != host_distro {
                 eprintln!("akt: rollback operates on host-installed packages; do not set --target-distro for rollback");
@@ -486,6 +539,12 @@ fn usage() -> String {
                                             (default is strict: a failed patch aborts the build)
   explain [--flavor F] [--name NAME]
                          explain what each option means for your custom kernel
+  install [--name NAME] [--out DIR] [--no-keep-running]
+                         install the built kernel into THIS system. The kernel you are running is
+                         made restorable FIRST: if no package file for it exists anywhere, one is
+                         rebuilt from what the package manager records as installed, and it is put
+                         back automatically if the install removes it. Arch and Debian today;
+                         Fedora and others are planned, each needing its own package-manager arm.
   rollback [--name NAME] reinstall the previous linux-<NAME> package from prev/ (kernel rollback).
                          A same-name upgrade removes the old version's modules, so the retained
                          prev/ package is the reliable rollback; boot-test in a throwaway first.
