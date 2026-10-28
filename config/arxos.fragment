@@ -108,6 +108,11 @@ CONFIG_CGROUP_BPF=y
 #     (ath9k/ath9k_htc, carl9170, rt2800usb, rtl8187, rtl8xxxu, mt76 mt7601u/mt76x2u/mt7921u,
 #     zd1211rw). That is Kali's in-kernel wireless posture; Kali's only extra is out-of-tree
 #     DKMS drivers (rtl8812au/8814au), which are a package/arsenal concern, not kernel config.
+#     REVISED 2026-10-28: mac80211 injection is native in 7.x, but Kali/Parrot STILL carry a
+#     source patch on top that changes how an INJECTED frame is handled (skip sequence-number
+#     renumbering, force NO_ACK so the injecting tool owns retries). That behaviour is not
+#     redundant with native support, so we now ship it ourselves as patches/arxos/0001 (plus the
+#     carl9170 sniffer promisc flag and the D-WAV USB touchscreen driver). See patches/arxos.
 #   * KSPP mainstream hardening — FORTIFY_SOURCE, HARDENED_USERCOPY, SLAB_FREELIST_RANDOM,
 #     SHUFFLE_PAGE_ALLOCATOR, INIT_STACK_ALL_ZERO, LIST_HARDENED, DEBUG_WX, VMAP_STACK,
 #     STACKPROTECTOR_STRONG are all already set by the base.
@@ -130,14 +135,25 @@ CONFIG_GNSS=m
 CONFIG_USB_SERIAL_GARMIN=m
 
 # ---- radios: RF / Wi-Fi (injection) / Bluetooth (§8 / chatgpt.md §1) ----
-# Monitor-mode injection is native in modern mac80211 (7.x); legacy Kali patches, if ever needed,
-# go in patches/ and are applied by build.sh. carl9170 kept as a module for sniffer use.
+# Monitor-mode injection is native in modern mac80211 (7.x). On top of that we now ship the Kali
+# injection patch (patches/arxos), which carl9170 keeps as a module for sniffer use.
 CONFIG_CFG80211=m
 CONFIG_MAC80211=m
 CONFIG_CFG80211_WEXT=y
 CONFIG_CARL9170=m
 CONFIG_BT=m
 CONFIG_RFKILL=m
+
+# ---- software-defined radio (RF capture/analysis; Kali/Parrot carry this, we match it) ----
+# The RT flavour exists for "RF, SDR, wireless capture", so the SDR receiver stack belongs in
+# every ArxOS kernel: HackRF, Airspy, MSI2500 + its MSi001 tuner, and the RTL2832 SDR path for
+# the ubiquitous RTL-SDR dongles. All modules, so they cost nothing until a radio is plugged in.
+CONFIG_MEDIA_SDR_SUPPORT=y
+CONFIG_USB_HACKRF=m
+CONFIG_USB_AIRSPY=m
+CONFIG_USB_MSI2500=m
+CONFIG_MEDIA_TUNER_MSI001=m
+CONFIG_DVB_RTL2832_SDR=m
 
 # ---- eBPF / BTF for defensive tooling + threat hunting (qwen.md) ----
 CONFIG_BPF_SYSCALL=y
