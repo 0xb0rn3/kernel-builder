@@ -110,6 +110,7 @@ flowchart LR
 | **Overlay and gate** | Merge `config/arxos.fragment`, `olddefconfig`, re-assert the hardening options, then verify the gate and the requested tuning. A stable build then re-stamps the release and stops if the source does not report `--kver`. `--configure-only` stops here. | Same. |
 | **Compile** | Re-detect resources, cap ThinLTO backends in the kernel Makefile, `makepkg -e -f`. | `make bindeb-pkg` (with `LLVM=1` for ThinLTO flavors). |
 | **Tidy** | Superseded artifacts move to `prev/`; packages move to `--out` if given. | Same. |
+| **Package metadata** | Rewrite only `.PKGINFO` and `.BUILDINFO`: a plain description, the akt URL, no upstream package in `provides`/`replaces`, and `/build` instead of the build directory, which would name your home folder. `.MTREE` is regenerated as makepkg does; the package is replaced only when its payload is byte-identical (sha256 per file). | Not needed. |
 
 </details>
 

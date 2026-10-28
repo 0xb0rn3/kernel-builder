@@ -1,6 +1,6 @@
 [package]
 name = "arxos-kernel-tuner"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Cross-distro kernel tuner: tuned upstream source + ARXOS hardening patches on Arch and Debian, with a GUI."
 license = "GPL-3.0-or-later"

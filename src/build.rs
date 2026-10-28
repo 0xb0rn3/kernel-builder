@@ -544,6 +544,73 @@ fn drop_stale_sources(recipe: &Path, env: &[(&str, &str)]) -> io::Result<()> {
     Ok(())
 }
 
+/// One-line description of what a flavor is, for the package metadata.
+fn package_traits(p: &Plan) -> String {
+    let mut t: Vec<&str> = vec![];
+    if p.flavor.key == "rt" { t.push("PREEMPT_RT"); }
+    if matches!(p.flavor.sched, "bore" | "rt-bore" | "hardened") { t.push("BORE scheduler"); }
+    if p.flavor.lto == "thin" { t.push("ThinLTO"); }
+    if p.flavor.key == "hardened" { t.push("kCFI"); }
+    t.push("hardened");
+    t.join(", ")
+}
+
+/// Rewrites .PKGINFO/.BUILDINFO of the linux-$KNAME packages in the current directory (run under
+/// fakeroot), regenerates .MTREE exactly as makepkg does, and refuses to replace a package unless
+/// the payload is byte-identical (sha256 per entry) and the upstream name is gone.
+const NEUTRAL_PKG_SCRIPT: &str = r#"# Neutral package metadata for the linux-$KNAME packages in the current directory. Run under
+# fakeroot. Rewrites ONLY .PKGINFO and .BUILDINFO, regenerates .MTREE exactly as makepkg does,
+# repacks in makepkg's order, then proves the payload is byte-identical to the original.
+#   .PKGINFO   pkgdesc + url name the upstream recipe; provides/replaces name its package
+#   .BUILDINFO builddir/startdir name the recipe folder AND the builder's home directory
+# Env: KNAME, AKT_TRAITS (e.g. "BORE scheduler, ThinLTO, hardened"), AKT_URL.
+set -euo pipefail
+shopt -s nullglob
+list_package_files() { ( export LC_COLLATE=C; shopt -s dotglob globstar; printf '%s\0' **/* ); }
+payload() { LANG=C bsdtar -cf - --format=mtree --options='!all,type,uid,gid,mode,size,sha256,link' \
+    --exclude .MTREE --exclude .PKGINFO --exclude .BUILDINFO "@$1"; }
+# select by the package's own pkgbase: a name glob for "arxos" would also catch linux-arxos-rt-*.
+pkgs=()
+for p in *.pkg.tar.zst; do
+    [ "$(bsdtar -xOf "$p" .PKGINFO | sed -n 's/^pkgbase = //p')" = "linux-$KNAME" ] && pkgs+=("$p")
+done
+[ ${#pkgs[@]} -gt 0 ] || { echo "  no linux-$KNAME packages here" >&2; exit 4; }
+for pkg in "${pkgs[@]}"; do
+    w=$(mktemp -d); new="$w/new.pkg.tar.zst"; root="$w/root"; mkdir "$root"
+    bsdtar -xpf "$pkg" -C "$root"
+    name=$(sed -n 's/^pkgname = //p' "$root/.PKGINFO")
+    case "$name" in
+        *-headers) what="headers and scripts for building modules" ;;
+        *-dbg)     what="non-stripped vmlinux" ;;
+        *)         what="kernel and modules" ;;
+    esac
+    epoch=$(stat -c %Y "$root/.MTREE")
+    for f in .PKGINFO .BUILDINFO; do touch -r "$root/$f" "$w/$f.time"; done
+    sed -i -e "s|^pkgdesc = .*|pkgdesc = Linux kernel tuned by akt ($AKT_TRAITS), $what|" \
+           -e "s|^url = .*|url = $AKT_URL|" \
+           -e '/^provides = linux-cachyos/Id' -e '/^replaces = linux-cachyos/Id' "$root/.PKGINFO"
+    sed -i -e 's|^builddir = .*|builddir = /build|' -e 's|^startdir = .*|startdir = /build|' "$root/.BUILDINFO"
+    for f in .PKGINFO .BUILDINFO; do touch -r "$w/$f.time" "$root/$f"; done
+    ( cd "$root"
+      rm -f .MTREE
+      list_package_files | LANG=C bsdtar -cnf - --format=mtree \
+          --options='!all,use-set,type,uid,gid,mode,time,size,sha256,link' \
+          --null --files-from - --exclude .MTREE | gzip -c -f -n > .MTREE
+      touch -d "@$epoch" .MTREE
+      set -o pipefail
+      list_package_files | LANG=C bsdtar --no-fflags --no-read-sparse -cnf - --null --files-from - \
+          | zstd -q -c -T0 - > "$new" )
+    if ! diff -q <(payload "$pkg") <(payload "$new") >/dev/null; then
+        echo "  $pkg: payload changed during the metadata rewrite; keeping the original" >&2; rm -rf "$w"; exit 5
+    fi
+    if bsdtar -xOf "$new" .PKGINFO .BUILDINFO | grep -qi cachy; then
+        echo "  $pkg: upstream name still present in the package metadata" >&2; rm -rf "$w"; exit 6
+    fi
+    mv -f "$new" "$pkg"; rm -rf "$w"
+    echo "  neutral metadata: $pkg (payload byte-identical)"
+done
+"#;
+
 fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level: bool) -> io::Result<()> {
     let text = std::fs::read_to_string(config)?;
     let has = |line: &str| text.lines().any(|v| v.trim() == line);
@@ -741,6 +808,14 @@ fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<
     // tidy the output dir: keep only what we just built, archive superseded versions into prev/.
     println!("\nDone.");
     let _ = step("tidy output dir", basep, &[("KNAME", p.kname.as_str())], TIDY_ARCH);
+    // makepkg copies the recipe's own description, URL and provides/replaces into .PKGINFO, and the
+    // build directory (the recipe folder AND this user's home) into .BUILDINFO. Rewrite only those
+    // two files, prove the payload is byte-identical, and fail closed if the upstream name remains.
+    let traits = package_traits(p);
+    step("neutral package metadata", basep,
+        &[("KNAME", p.kname.as_str()), ("AKT_TRAITS", traits.as_str()),
+          ("AKT_URL", "https://github.com/0xb0rn3/kernel-builder"), ("AKT_NEUTRAL", NEUTRAL_PKG_SCRIPT)],
+        "fakeroot -- bash -c \"$AKT_NEUTRAL\"")?;
     if let Some(dir) = &p.out {
         step(&format!("move packages -> {dir}"), basep, &[("OUT", dir.as_str()), ("KNAME", p.kname.as_str())],
             "mkdir -p \"$OUT\" && mv -f linux-$KNAME*.pkg.tar.* \"$OUT\"/ 2>/dev/null && echo \"  moved to $OUT\" || echo \"  (nothing to move)\"")?;
@@ -1182,6 +1257,22 @@ _apply_one() {
 mod tests {
     use super::*;
     use std::cmp::Ordering;
+
+    #[test]
+    fn package_traits_describe_each_flavor() {
+        let plan = |key| Plan::resolve(Distro::Arch, crate::flavor(key).unwrap(), "arxos", None, "1");
+        assert_eq!(package_traits(&plan("default")), "BORE scheduler, ThinLTO, hardened");
+        assert_eq!(package_traits(&plan("rt")), "PREEMPT_RT, BORE scheduler, hardened");
+        assert_eq!(package_traits(&plan("hardened")), "BORE scheduler, ThinLTO, kCFI, hardened");
+    }
+
+    #[test]
+    fn neutral_metadata_script_parses_and_guards_the_payload() {
+        let st = std::process::Command::new("bash").args(["-n", "-c", NEUTRAL_PKG_SCRIPT]).status().unwrap();
+        assert!(st.success(), "embedded script has a syntax error");
+        assert!(NEUTRAL_PKG_SCRIPT.contains("diff -q <(payload"), "payload identity check must stay");
+        assert!(NEUTRAL_PKG_SCRIPT.contains("grep -qi cachy"), "fail-closed name check must stay");
+    }
 
     #[test]
     fn split_kver_takes_the_series_line_and_point_release() {
