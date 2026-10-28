@@ -238,6 +238,7 @@ fn cpu_processor_opt(target: &str, work: &Path) -> io::Result<String> {
 // recipe commit. Keep this narrowly pinned: if the recipe or patch changes, fail closed.
 #[derive(Default)]
 struct SrcInfo {
+    pkgbase: Option<String>,
     pkgver: Option<String>,
     pkgrel: Option<String>,
     sources: Vec<String>,
@@ -251,6 +252,7 @@ fn parse_srcinfo(text: &str) -> SrcInfo {
         let key = key.trim();
         let value = value.trim().to_string();
         match key {
+            "pkgbase" if info.pkgbase.is_none() => info.pkgbase = Some(value),
             "pkgver" if info.pkgver.is_none() => info.pkgver = Some(value),
             "pkgrel" if info.pkgrel.is_none() => info.pkgrel = Some(value),
             "source" | "source_x86_64" => info.sources.push(value),
@@ -721,6 +723,9 @@ fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<
         ("_hugepage", p.hugepages.as_str()), ("_per_gov", pgov), ("_use_kcfi", kcfi),
         ("_cpusched", p.flavor.sched), ("_use_llvm_lto", p.flavor.lto), ("_preempt", "full"),
         ("_build_zfs", "no"), ("_build_nvidia_open", "no"), ("_cachy_config", "yes"),
+        // the recipe appends -gcc (non-LTO) or -lto to the PACKAGE name by default, which would turn
+        // linux-arxos-rt into linux-arxos-rt-gcc; the name must be exactly linux-<name>.
+        ("_use_gcc_suffix", "no"), ("_use_lto_suffix", "no"),
         ("PACKAGER", "ARXOS <team@arxos.uk>"), ("ARXOS_PKGREL", p.pkgrel.as_str()), ("KNAME", p.kname.as_str()),
         ("ARXOS_BUILD_JOBS", jobs.as_str()),
     ];
@@ -741,6 +746,11 @@ fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<
     //    what it downloaded (fail-closed on a tampered/mismatched source), matching the private
     //    linux-arxos builder. `-C` cleans the previous src/pkg for this recipe only.
     ensure_pgp_keys(&basep.join("PKGBUILD"))?;
+    let resolved = active_srcinfo(basep, &env)?.pkgbase.unwrap_or_default();
+    if resolved != format!("linux-{}", p.kname) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+            "the recipe would build {resolved}, not linux-{}; refusing (package names must match the flavor)", p.kname)));
+    }
     drop_stale_sources(basep, &env)?;
     step("[3/5] extract + prepare", basep, &env, "makepkg -o -C --nodeps --noconfirm")?;
     if prepare_only {
@@ -1257,6 +1267,12 @@ _apply_one() {
 mod tests {
     use super::*;
     use std::cmp::Ordering;
+
+    #[test]
+    fn srcinfo_reports_the_resolved_pkgbase() {
+        let info = parse_srcinfo("pkgbase = linux-arxos-rt\n\tpkgver = 7.3.0\n\tpkgrel = 1\n\tsource = x\npkgname = linux-arxos-rt\n");
+        assert_eq!(info.pkgbase.as_deref(), Some("linux-arxos-rt"));
+    }
 
     #[test]
     fn package_traits_describe_each_flavor() {
