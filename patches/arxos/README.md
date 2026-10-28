@@ -1,7 +1,18 @@
 # ARXOS kernel patches
 
 Drop `*.patch` or `*.diff` files here to have them applied to **every** build, on both the Arch and
-the Debian path. **This directory currently ships no patches.**
+the Debian path.
+
+**Shipped here now (adopted from the Kali/Parrot kernel trees, 2026-10-28):**
+
+| Patch | What it does |
+|---|---|
+| `0001-mac80211-injected-frame-handling.patch` | On an injected Wi-Fi frame, skip sequence-number renumbering and force NO_ACK so the injecting tool owns retries. This is the behaviour Kali and Parrot add on top of native mac80211 injection. |
+| `0002-carl9170-sniffer-promisc.patch` | Enable the carl9170 sniffer (promiscuous) mode flag, for the AR9170 USB sniffer dongles. |
+| `0003-input-dwav-usb-multitouch.patch` | In-tree D-WAV Scientific USB multitouch driver. |
+
+`SHA256SUMS` covers all three and is checked before anything is applied. The three are verified to
+apply cleanly to both the 7.3.0 mainline and the 7.2.13 stable trees.
 
 ## How patches in this directory are used
 
