@@ -168,7 +168,7 @@ fn pacman_u(paths: &[PathBuf]) -> io::Result<()> {
 
 /// Install the newest built kernel (and matching headers) into the running system.
 fn install_arch(p: &Plan, keep_running: bool) -> io::Result<()> {
-    let work = crate::build::work_dir(crate::Distro::Arch, p.flavor.key)?;
+    let work = crate::build::work_dir(crate::Distro::Arch, &p.work_key())?;
     let outdir = p.out.clone().unwrap_or_else(|| work.join("cos/linux-cachyos").display().to_string());
     let outdir = PathBuf::from(outdir);
     let kpkg = format!("linux-{}", p.kname);
@@ -261,7 +261,7 @@ fn install_arch(p: &Plan, keep_running: bool) -> io::Result<()> {
 /// property of the packaging, not a guarantee from us, so it is verified after the install rather
 /// than assumed, and the running image package is reported so the user knows what to keep.
 fn install_debian(p: &Plan, keep_running: bool) -> io::Result<()> {
-    let work = crate::build::work_dir(crate::Distro::Debian, p.flavor.key)?;
+    let work = crate::build::work_dir(crate::Distro::Debian, &p.work_key())?;
     let outdir = PathBuf::from(p.out.clone().unwrap_or_else(|| work.display().to_string()));
     let debs = sh(&format!(
         "ls -1 {}/linux-image-*{}*.deb {}/linux-headers-*.deb 2>/dev/null",

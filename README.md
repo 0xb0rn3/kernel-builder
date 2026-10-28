@@ -103,11 +103,11 @@ flowchart LR
 
 | Stage | Arch family | Debian family |
 |---|---|---|
-| **Source** | Clone or fast-forward the upstream recipe. With `--source-ref`, fetch and check out that ref detached; it is never pulled forward. | `sudo apt-get install linux-source` plus build dependencies, then extract the source tarball. |
-| **Preparation** | Cap the recipe's `nproc` jobs, rebuild the PKGBUILD `b2sums` from matching `.SRCINFO`, import any missing **pinned** upstream signing keys, then `makepkg -o` downloads and verifies sources. `--prepare-only` stops here. | Seed `.config` from `/boot/config-$(uname -r)` (falls back to `make defconfig`). |
+| **Source** | Clone the upstream recipe and check out the fetched tip detached. With `--source-ref`, fetch and check out that ref instead; it is never pulled forward. With `--series stable`, use the last tuned recipe of the requested X.Y series, then fetch the kernel.org stable updates that bring it to `--kver`. They are used only if kernel.org's checksum list carries a valid signature from its pinned checksum key. | `sudo apt-get install linux-source` plus build dependencies, then extract the source tarball. |
+| **Preparation** | Cap the recipe's `nproc` jobs, rebuild the PKGBUILD `b2sums` from matching `.SRCINFO`, import any missing **pinned** upstream signing keys, remove any cached download whose checksum no longer matches the recipe, then `makepkg -o` downloads and verifies sources. `--prepare-only` stops here. | Seed `.config` from `/boot/config-$(uname -r)` (falls back to `make defconfig`). |
 | **Tuning** | upstream PKGBUILD variables: `_cpusched`, `_use_llvm_lto`, `_HZ_ticks`, `_processor_opt`, `_hugepage`, `_per_gov`, `_use_kcfi`, `_tcp_bbr3`, `_preempt`. | `scripts/config` sets HZ, BBR, THP, MGLRU, the x86-64 level, governor, and LTO / PREEMPT_RT / kCFI where the source supports them. BORE is enabled only if the source contains it. |
-| **Patches** | Bundled `patches/arxos/`, then your `--patch` inputs. Integrity check first, then apply. | Bundled `patches/arxos/` and `patches/kali/`, then your `--patch` inputs. |
-| **Overlay and gate** | Merge `config/arxos.fragment`, `olddefconfig`, re-assert the hardening options, then verify the gate and the requested tuning. | Same. |
+| **Patches** | For `--series stable`, the kernel.org stable updates first, always strict. Then bundled `patches/arxos/`, then your `--patch` inputs. Integrity check first, then apply. | Bundled `patches/arxos/` and `patches/kali/`, then your `--patch` inputs. |
+| **Overlay and gate** | Merge `config/arxos.fragment`, `olddefconfig`, re-assert the hardening options, then verify the gate and the requested tuning. A stable build then re-stamps the release and stops if the source does not report `--kver`. `--configure-only` stops here. | Same. |
 | **Compile** | Re-detect resources, cap ThinLTO backends in the kernel Makefile, `makepkg -e -f`. | `make bindeb-pkg` (with `LLVM=1` for ThinLTO flavors). |
 | **Tidy** | Superseded artifacts move to `prev/`; packages move to `--out` if given. | Same. |
 
@@ -123,7 +123,7 @@ flowchart LR
 | `akt plan` | Print the resolved plan. Builds nothing. |
 | `akt patches` | List every patch that would be applied, in order. |
 | `akt explain` | Plain-English meaning of each performance, hardening and security option. |
-| `akt build` | Build a kernel package. Supports `--dry-run` and `--prepare-only`. |
+| `akt build` | Build a kernel package. Supports `--dry-run`, `--prepare-only` and `--configure-only`. |
 | `akt gate <config>` | Verify the hardening delta in a `.config`. Exits non-zero on failure. |
 | `akt rollback` | Reinstall the previous `linux-NAME` package from `prev/` (Arch path). |
 | `akt gui` | Start the local web UI (default `http://127.0.0.1:8787`, `--port N`). |
@@ -150,12 +150,15 @@ flowchart LR
 | `--max-jobs` | `auto`, positive integer | `auto` | An upper bound; the resource plan can only lower it. |
 | `--thinlto-jobs` | `auto`, positive integer | `auto` | Independent cap on ThinLTO backends. |
 | `--source-ref` | tag, branch or commit | rolling | Arch only. Letters, digits, `.`, `_`, `-`, `/`; up to 200 characters; no `..` or `//`. |
+| `--series` | `mainline`, `stable` | `mainline` | Arch only. `stable` builds an older X.Y series with its kernel.org stable updates and needs `--kver`. Each series has its own workspace, so a mainline and a stable build can run side by side. |
+| `--kver` | `X.Y.Z` | none | The stable release to build, for example `7.2.13`. Only with `--series stable`. |
 | `--patch` | file or directory | none | Repeatable. Applied after bundled patches, in the order given. |
 | `--patch-optional` | flag | off | Skip patches that do not apply instead of aborting. |
 | `--dry-run` | flag | off | Plan plus resource check. Compiles nothing. |
 | `--prepare-only` | flag | off | Arch host and Arch target only. Download and verify sources, then stop. |
+| `--configure-only` | flag | off | Arch host and Arch target only. Verify sources, apply patches, resolve the configuration and pass the gate, then stop before compiling. |
 
-Neither `--dry-run` nor `--prepare-only` installs a kernel. A dry run reports the real disk capacity but does not enforce the 60 GiB full-build floor.
+None of `--dry-run`, `--prepare-only` or `--configure-only` installs a kernel. A dry run reports the real disk capacity but does not enforce the 60 GiB full-build floor.
 
 </details>
 

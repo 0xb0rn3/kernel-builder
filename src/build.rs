@@ -52,6 +52,7 @@ fn print_plan(p: &Plan) {
     for t in &p.tunes { println!("  tune    : {t}"); }
     for o in &p.overlays { println!("  overlay : {o}"); }
     for ps in &p.patch_sets { println!("  patches : {ps}"); }
+    if p.series == "stable" { println!("  series  : stable {}", p.kver.as_deref().unwrap_or("?")); }
     println!("  output  : {}\n", p.output);
 }
 
@@ -188,7 +189,7 @@ pub fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
         .join(format!("{}-{flavor}", distro.name())))
 }
 
-pub fn run(plan: Plan, dry: bool, prepare_only: bool) -> io::Result<()> {
+pub fn run(plan: Plan, dry: bool, prepare_only: bool, configure_only: bool) -> io::Result<()> {
     if plan.distro == Distro::Unknown {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported host (need Arch- or Debian-family)"));
     }
@@ -198,15 +199,18 @@ pub fn run(plan: Plan, dry: bool, prepare_only: bool) -> io::Result<()> {
     if prepare_only && plan.distro != Distro::Arch {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch source recipe"));
     }
+    if configure_only && (dry || prepare_only || plan.distro != Distro::Arch) {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "--configure-only is supported only for a real Arch source build"));
+    }
     print_plan(&plan);
     if dry {
-        let work = work_dir(plan.distro, plan.flavor.key)?;
+        let work = work_dir(plan.distro, &plan.work_key())?;
         resources::detect_dry_run(&work)?.report();
         println!("[dry-run] no build performed. Resource estimates use actual disk capacity, but the 60 GiB full-build threshold is not enforced for a plan-only run.");
         return Ok(());
     }
     match plan.distro {
-        Distro::Arch => build_arch(&plan, prepare_only),
+        Distro::Arch => build_arch(&plan, prepare_only, configure_only),
         Distro::Debian if prepare_only => Err(io::Error::new(io::ErrorKind::Unsupported, "--prepare-only is supported only for the Arch source recipe")),
         Distro::Debian => build_debian(&plan),
         Distro::Unknown => unreachable!(),
@@ -427,6 +431,119 @@ fn sync_upstream_b2sums(pkgbuild: &Path, repo_root: &Path, env: &[(&str, &str)])
     Ok(())
 }
 
+/// kernel.org's checksum autosigner. A stable update is used only when the sha256sums.asc that lists
+/// it carries a valid signature from exactly this key, verified in a throwaway keyring.
+const KORG_AUTOSIGNER_FPR: &str = "B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1";
+
+/// "7.2.13" -> ("7.2", 13)
+fn split_kver(v: &str) -> Option<(String, u32)> {
+    let (line, minor) = v.rsplit_once('.')?;
+    if line.split('.').count() != 2 { return None; }
+    Some((line.to_string(), minor.parse().ok()?))
+}
+
+/// A top-level `key=value` assignment from a PKGBUILD, unquoted.
+fn recipe_field(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    text.lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+}
+
+/// The newest recipe commit (from the fetched tip) whose PKGBUILD is the requested X.Y line: the last
+/// tuned source of that series before upstream moved to the next one.
+fn find_series_recipe(cos: &Path, line: &str) -> io::Result<String> {
+    let log = Command::new("git")
+        .args(["log", "--format=%H", "-n", "800", "FETCH_HEAD", "--", "linux-cachyos/PKGBUILD"])
+        .current_dir(cos).output()?;
+    if !log.status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "cannot read the upstream recipe history"));
+    }
+    for commit in String::from_utf8_lossy(&log.stdout).lines() {
+        let show = Command::new("git").args(["show", &format!("{commit}:linux-cachyos/PKGBUILD")])
+            .current_dir(cos).output()?;
+        if show.status.success() && recipe_field(&String::from_utf8_lossy(&show.stdout), "_major").as_deref() == Some(line) {
+            println!("stable series: last tuned {line} recipe is {}", &commit[..commit.len().min(12)]);
+            return Ok(commit.to_string());
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound,
+        format!("no tuned {line} recipe in the recent upstream history; pin one with --source-ref")))
+}
+
+/// Download the kernel.org incremental stable patches line.from -> line.to into <work>/stable-incr,
+/// accept them only if the signed checksum list matches, and return the unpacked patch paths in order.
+fn fetch_stable_updates(workp: &Path, line: &str, from: u32, to: u32) -> io::Result<Vec<String>> {
+    if from == to { return Ok(vec![]); }
+    let names: Vec<String> = (from..to).map(|m| format!("patch-{line}.{m}-{}.xz", m + 1)).collect();
+    let major = line.split('.').next().unwrap_or("");
+    let list = names.join(" ");
+    let env = [("KLINE", line), ("KMAJOR", major), ("KORG_FPR", KORG_AUTOSIGNER_FPR), ("KPATCHES", list.as_str())];
+    step(&format!("[1b/5] fetch + verify kernel.org stable updates {line}.{from} -> {line}.{to}"), workp, &env,
+        r#"set -euo pipefail
+rm -rf stable-incr; mkdir -p stable-incr; cd stable-incr
+export GNUPGHOME="$PWD/.gnupg"; mkdir -m 700 "$GNUPGHOME"
+base="https://cdn.kernel.org/pub/linux/kernel/v${KMAJOR}.x/incr"
+curl -fsSL --retry 3 -o sha256sums.asc "$base/sha256sums.asc"
+gpg --batch --quiet --auto-key-locate clear,wkd --locate-keys autosigner@kernel.org >/dev/null 2>&1 \
+  || { echo "  cannot fetch the kernel.org autosigner key" >&2; exit 6; }
+gpg --batch --status-fd 1 --verify sha256sums.asc 2>/dev/null | grep -q "^\[GNUPG:\] VALIDSIG ${KORG_FPR} " \
+  || { echo "  the kernel.org checksum list is not signed by the pinned autosigner key; refusing" >&2; exit 6; }
+gpg --batch --quiet --decrypt sha256sums.asc 2>/dev/null > sha256sums.verified
+echo "  signed checksum list verified (autosigner ${KORG_FPR})"
+i=0
+for f in $KPATCHES; do
+  i=$((i + 1))
+  curl -fsSL --retry 3 -o "$f" "$base/$f"
+  want=$(awk -v f="$f" '$2 == f { print $1 }' sha256sums.verified)
+  [ -n "$want" ] || { echo "  $f is not in the signed checksum list" >&2; exit 6; }
+  echo "$want  $f" | sha256sum -c --quiet - || { echo "  $f does not match its signed checksum" >&2; exit 6; }
+  n="${f%.xz}"; n="${n##*-}"
+  out=$(printf '%03d-linux-%s.%s.patch' "$i" "$KLINE" "$n")
+  xz -dc "$f" > "$out"
+  echo "  verified: $f -> $out"
+done"#)?;
+    Ok((from..to).enumerate()
+        .map(|(i, m)| workp.join("stable-incr").join(format!("{:03}-linux-{line}.{}.patch", i + 1, m + 1)).display().to_string())
+        .collect())
+}
+
+/// The file name makepkg caches a REMOTE source under, or None for local recipe files and VCS sources.
+fn cached_source_name(source: &str) -> Option<String> {
+    let (name, url) = match source.split_once("::") {
+        Some((n, u)) => (n.to_string(), u),
+        None => (source.rsplit('/').next().unwrap_or("").to_string(), source),
+    };
+    if !url.contains("://") || url.starts_with("git+") || name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return None;
+    }
+    Some(name)
+}
+
+/// makepkg caches downloads in the recipe dir by FILE NAME, and some upstream sources keep one name
+/// across series (the per-series scheduler patch). A copy cached by an older build then shadows the
+/// new download and fails the integrity check. Drop any cached remote source whose BLAKE2 no longer
+/// matches the recipe so makepkg fetches it again; matching files (the large tarball) are kept.
+fn drop_stale_sources(recipe: &Path, env: &[(&str, &str)]) -> io::Result<()> {
+    let info = active_srcinfo(recipe, env)?;
+    if info.sources.len() != info.b2sums.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "source/checksum count mismatch in the recipe"));
+    }
+    for (source, sum) in info.sources.iter().zip(&info.b2sums) {
+        if sum == "SKIP" { continue; }
+        let Some(name) = cached_source_name(source) else { continue };
+        let path = recipe.join(&name);
+        if !path.is_file() { continue; }
+        let out = Command::new("b2sum").arg(&path).output()?;
+        let have = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_string();
+        if !out.status.success() || have != *sum {
+            std::fs::remove_file(&path)?;
+            println!("akt: removed a cached download that no longer matches the recipe: {name}");
+        }
+    }
+    Ok(())
+}
+
 fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level: bool) -> io::Result<()> {
     let text = std::fs::read_to_string(config)?;
     let has = |line: &str| text.lines().any(|v| v.trim() == line);
@@ -467,9 +584,9 @@ fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level:
     Ok(())
 }
 
-fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
+fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<()> {
     let dd = data_dir();
-    let work = work_dir(Distro::Arch, p.flavor.key)?.display().to_string();
+    let work = work_dir(Distro::Arch, &p.work_key())?.display().to_string();
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
     let _lock = acquire_build_lock(workp)?;   // cross-process (CLI+GUI) lock; held until this returns
@@ -478,18 +595,50 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
     initial.report();
     let jobs = initial.jobs.to_string();
 
-    // 1. fetch the upstream recipe. A specified source ref is checked out detached and never pulled forward.
+    // 1. fetch the upstream recipe. A specified source ref is checked out detached and never pulled
+    //    forward. Rolling builds detach at the fetched tip: a `pull` would silently keep an old recipe
+    //    whenever an earlier pinned build left the checkout detached.
     let requested_ref = p.source_ref.as_deref().unwrap_or("");
     step("[1/5] fetch the kernel source", workp, &[("ARXOS_SOURCE_REF", requested_ref)],
         "set -e; if [ ! -d cos/.git ]; then git clone -q https://github.com/CachyOS/linux-cachyos.git cos; fi; \
          git -C cos checkout -- linux-cachyos/PKGBUILD; \
          if [ -n \"$ARXOS_SOURCE_REF\" ]; then \
            git -C cos fetch -q --tags origin \"$ARXOS_SOURCE_REF\"; \
-           git -C cos checkout -q --detach FETCH_HEAD; \
-         else git -C cos pull -q --ff-only || true; fi")?;
+         else git -C cos fetch -q origin HEAD; fi; \
+         git -C cos checkout -q --detach FETCH_HEAD")?;
 
     let base = format!("{work}/cos/linux-cachyos");
     let basep = Path::new(&base);
+
+    // 1b. stable series: move to the last tuned recipe of the requested X.Y line (unless a ref was
+    //     pinned), then fetch the kernel.org stable updates that bring it to --kver.
+    let mut stable_updates: Vec<String> = vec![];
+    if p.series == "stable" {
+        let kver = p.kver.as_deref().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--series stable needs --kver"))?;
+        let (line, want_minor) = split_kver(kver).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid --kver"))?;
+        let cos = Path::new(&work).join("cos");
+        if p.source_ref.is_none() {
+            let commit = find_series_recipe(&cos, &line)?;
+            let st = Command::new("git").args(["checkout", "-q", "--detach", &commit]).current_dir(&cos).status()?;
+            if !st.success() {
+                return Err(io::Error::new(io::ErrorKind::Other, format!("cannot check out the {line} recipe {commit}")));
+            }
+        }
+        let recipe = std::fs::read_to_string(basep.join("PKGBUILD"))?;
+        let rmajor = recipe_field(&recipe, "_major").unwrap_or_default();
+        let rminor: u32 = recipe_field(&recipe, "_minor").and_then(|v| v.parse().ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the recipe has no numeric _minor"))?;
+        if rmajor != line {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                format!("the selected recipe is the {rmajor} series, not {line}; pick a --source-ref from the {line} series")));
+        }
+        if want_minor < rminor {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                format!("{kver} is older than the newest tuned {line} source ({line}.{rminor}); pin an older --source-ref to build it")));
+        }
+        println!("stable series: tuned {line}.{rminor} source -> {kver} ({} kernel.org update(s))", want_minor - rminor);
+        stable_updates = fetch_stable_updates(workp, &line, rminor, want_minor)?;
+    }
     let revision = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(basep).output()?;
     if !revision.status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "cannot identify the upstream recipe revision"));
@@ -511,15 +660,21 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
     resources::limit_recipe(&basep.join("PKGBUILD"))?;
     sync_upstream_b2sums(&basep.join("PKGBUILD"), basep.parent().unwrap_or(basep), &env)?;
 
-    // 2. de-brand + pkgrel (matches linux-arxos build.sh).
-    step(&format!("[2/5] de-brand recipe -> linux-{}", p.kname), basep, &env,
+    // 2. de-brand + pkgrel (matches linux-arxos build.sh). A stable build also takes --kver as the
+    //    package version; the source tarball name keeps the recipe's own _major/_minor.
+    let stable_ver = if p.series == "stable" { p.kver.clone().unwrap_or_default() } else { String::new() };
+    let mut env2 = env.to_vec();
+    env2.push(("ARXOS_KVER", stable_ver.as_str()));
+    step(&format!("[2/5] de-brand recipe -> linux-{}", p.kname), basep, &env2,
         "sed -i \"s/_pkgsuffix=cachyos/_pkgsuffix=$KNAME/g; s/KBUILD_BUILD_HOST=cachyos/KBUILD_BUILD_HOST=$KNAME/\" PKGBUILD; \
-         sed -i \"s/^pkgrel=.*/pkgrel=${ARXOS_PKGREL:-1}/\" PKGBUILD")?;
+         sed -i \"s/^pkgrel=.*/pkgrel=${ARXOS_PKGREL:-1}/\" PKGBUILD; \
+         if [ -n \"$ARXOS_KVER\" ]; then sed -i \"s/^pkgver=.*/pkgver=$ARXOS_KVER/\" PKGBUILD; fi")?;
 
     // 3. extract + prepare. NO --skipinteg: makepkg verifies the recipe's source checksums against
     //    what it downloaded (fail-closed on a tampered/mismatched source), matching the private
     //    linux-arxos builder. `-C` cleans the previous src/pkg for this recipe only.
     ensure_pgp_keys(&basep.join("PKGBUILD"))?;
+    drop_stale_sources(basep, &env)?;
     step("[3/5] extract + prepare", basep, &env, "makepkg -o -C --nodeps --noconfirm")?;
     if prepare_only {
         println!("[prepare-only] source downloads and makepkg integrity checks completed; kernel configuration, compilation, and packaging were not run.");
@@ -528,6 +683,11 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
 
     // 4. overlay ARXOS config + patches, RE-ASSERT + HARD-VERIFY the delta (fail-fast).
     let kdir = find_kdir(basep).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "kernel source dir not found under src/"))?;
+    // Stable updates go first and always strictly: every later patch and the config expect --kver.
+    if !stable_updates.is_empty() {
+        step(&format!("apply {} kernel.org stable update(s) [strict]", stable_updates.len()),
+            Path::new(&kdir), &[], &apply_patches_script(&stable_updates, true))?;
+    }
     let (pfiles, pdirs) = collect_patches(&bundled_patch_dirs(p.distro), &p.extra_patches);
     if !pfiles.is_empty() {
         if !pdirs.is_empty() { step("verify patch integrity", Path::new(&kdir), &[], &integrity_script(&pdirs))?; }
@@ -553,6 +713,21 @@ fn build_arch(p: &Plan, prepare_only: bool) -> io::Result<()> {
     let detected_level = crate::sysinfo::SystemInfo::detect(workp).x86_level;
     if selected_level > detected_level && p.cpu_target != "portable" {
         eprintln!("WARNING: requested x86-64-v{selected_level} exceeds locally detected baseline v{detected_level}; the kernel may not boot on this machine.");
+    }
+    // The recipe's prepare() recorded the release BEFORE the stable updates moved the source, and
+    // package() installs into that name. Re-stamp it from the patched tree and prove it is --kver.
+    if p.series == "stable" {
+        step("[4b/5] stamp the stable release", Path::new(&kdir), &[("ARXOS_KVER", stable_ver.as_str())],
+            "set -e; kv=$(make -s kernelversion); \
+             if [ \"$kv\" != \"$ARXOS_KVER\" ]; then echo \"  source reports $kv, expected $ARXOS_KVER\" >&2; exit 7; fi; \
+             make -s kernelrelease > version; \
+             case \"$(cat version)\" in \"$ARXOS_KVER\"-*) echo \"  kernel release: $(cat version)\";; \
+               *) echo \"  version stamp $(cat version) does not start with $ARXOS_KVER\" >&2; exit 7;; esac")?;
+    }
+    if configure_only {
+        println!("[configure-only] sources verified, patches applied, configuration resolved and the hardening gate passed; compilation and packaging were not run.");
+        println!("  config: {}", crate::display_path(&format!("{kdir}/.config")));
+        return Ok(());
     }
 
     // 5. build (-f overwrites a stale same-version pkg from a prior, e.g. wrong-config, build).
@@ -728,7 +903,7 @@ pub fn rollback(p: &Plan) -> io::Result<()> {
     if p.distro != Distro::Arch {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "akt rollback currently supports the Arch path only"));
     }
-    let work = work_dir(Distro::Arch, p.flavor.key)?.display().to_string();
+    let work = work_dir(Distro::Arch, &p.work_key())?.display().to_string();
     let prev = Path::new(&work).join("cos/linux-cachyos/prev");
     let kpkg = format!("linux-{}", p.kname);
     let hpkg = format!("linux-{}-headers", p.kname);
@@ -793,7 +968,7 @@ pub fn rollback(p: &Plan) -> io::Result<()> {
 
 fn build_debian(p: &Plan) -> io::Result<()> {
     let dd = data_dir();
-    let work = work_dir(Distro::Debian, p.flavor.key)?.display().to_string();
+    let work = work_dir(Distro::Debian, &p.work_key())?.display().to_string();
     std::fs::create_dir_all(&work)?;
     let workp = Path::new(&work);
     let _lock = acquire_build_lock(workp)?;   // cross-process (CLI+GUI) lock; held until this returns
@@ -1007,6 +1182,31 @@ _apply_one() {
 mod tests {
     use super::*;
     use std::cmp::Ordering;
+
+    #[test]
+    fn split_kver_takes_the_series_line_and_point_release() {
+        assert_eq!(split_kver("7.2.13"), Some(("7.2".to_string(), 13)));
+        assert_eq!(split_kver("6.18.0"), Some(("6.18".to_string(), 0)));
+        assert_eq!(split_kver("7.2"), None);
+        assert_eq!(split_kver("7.2.x"), None);
+    }
+
+    #[test]
+    fn recipe_field_reads_top_level_assignments_only() {
+        let pkgbuild = "pkgbase=\"linux-$_pkgsuffix\"\n_major=7.2\n_minor=11\n  _major=9.9\npkgver=${_major}.${_minor}\n";
+        assert_eq!(recipe_field(pkgbuild, "_major").as_deref(), Some("7.2"));
+        assert_eq!(recipe_field(pkgbuild, "_minor").as_deref(), Some("11"));
+        assert_eq!(recipe_field(pkgbuild, "_tagrel"), None);
+    }
+
+    #[test]
+    fn cached_source_name_only_matches_remote_downloads() {
+        assert_eq!(cached_source_name("https://raw.example/7.3/sched/0001-bore-cachy.patch").as_deref(), Some("0001-bore-cachy.patch"));
+        assert_eq!(cached_source_name("src.tar.gz::https://example.invalid/x/y").as_deref(), Some("src.tar.gz"));
+        assert_eq!(cached_source_name("config"), None);
+        assert_eq!(cached_source_name("git+https://github.com/cachyos/zfs.git#commit=fb48"), None);
+        assert_eq!(cached_source_name("../evil::https://example.invalid/x"), None);
+    }
 
     #[test]
     fn srcinfo_checksum_lookup_tracks_current_metadata() {

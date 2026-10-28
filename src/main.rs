@@ -101,6 +101,8 @@ pub struct Plan {
     pub max_jobs: Option<usize>, // optional cap, further clamped by resource planner
     pub thinlto_jobs: Option<usize>, // optional independent ThinLTO backend cap
     pub source_ref: Option<String>, // pinned upstream recipe ref for Arch builds
+    pub series: String,        // "mainline" (CachyOS rolling recipe) or "stable" (kernel.org tarball)
+    pub kver: Option<String>,  // for series=stable: the exact kernel.org version, e.g. "7.2.13"
     pub base: String,          // upstream base we fork/patch
     pub tunes: Vec<String>,    // performance tunes applied
     pub overlays: Vec<String>, // ARXOS config fragments overlaid
@@ -118,7 +120,7 @@ impl Plan {
             Distro::Arch => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None, series: "mainline".into(), kver: None,
                 extra_patches: vec![], patch_strict: true,
                 base: format!("{UPSTREAM} (rolling latest)"),
                 tunes: vec![
@@ -131,7 +133,7 @@ impl Plan {
             Distro::Debian => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None, series: "mainline".into(), kver: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "Debian kernel source (apt source / linux-source)".into(),
                 tunes: vec![
@@ -148,7 +150,7 @@ impl Plan {
             Distro::Unknown => Plan {
                 distro, flavor: fl, kname: kname.to_string(),
                 out: out.map(|s| s.to_string()), pkgrel: pkgrel.to_string(),
-                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None,
+                cpu_target: "auto".into(), hz: "1000".into(), hugepages: "madvise".into(), performance_governor: false, max_jobs: None, thinlto_jobs: None, source_ref: None, series: "mainline".into(), kver: None,
                 extra_patches: vec![], patch_strict: true,
                 base: "unknown host".into(), tunes: vec![], overlays: vec![], patch_sets: vec![],
                 output: "unsupported — akt supports Arch-family and Debian-family hosts".into(),
@@ -196,6 +198,30 @@ impl Plan {
         }
         self
     }
+    /// Select the source series. "mainline" follows the rolling tuned recipe; "stable" takes the last
+    /// tuned recipe of the requested X.Y series and brings it to --kver with signed kernel.org
+    /// stable updates (see build::build_arch).
+    pub fn with_series(mut self, series: &str, kver: Option<String>) -> Plan {
+        self.series = series.to_string();
+        self.kver = kver;
+        if self.distro == Distro::Arch && self.series == "stable" {
+            let v = self.kver.clone().unwrap_or_else(|| "X.Y.Z".into());
+            let line = v.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_else(|| v.clone());
+            self.base = format!("{UPSTREAM}, {line} series, brought to {v} with signed kernel.org stable updates");
+        }
+        if let Some(first) = self.tunes.first_mut() {
+            match (&*self.series, self.kver.as_deref()) {
+                ("stable", Some(v)) => first.push_str(&format!(", series=stable {v}")),
+                (s, _) => first.push_str(&format!(", series={s}")),
+            }
+        }
+        self
+    }
+    /// Workspace key: one tree per flavor AND series, so a stable build never shares a source tree,
+    /// cached downloads, or the build lock with a mainline build of the same flavor.
+    pub fn work_key(&self) -> String {
+        if self.series == "stable" { format!("{}-stable", self.flavor.key) } else { self.flavor.key.to_string() }
+    }
     pub fn with_source_ref(mut self, source_ref: Option<String>) -> Plan {
         self.source_ref = source_ref;
         if let Some(first) = self.tunes.first_mut() {
@@ -216,12 +242,13 @@ impl Plan {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"max_jobs\":{},\"thinlto_jobs\":{},\"source_ref\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
+            "{{\"distro\":\"{}\",\"flavor\":\"{}\",\"kernel\":\"{}\",\"pkgrel\":\"{}\",\"out\":\"{}\",\"cpu_target\":\"{}\",\"hz\":\"{}\",\"hugepages\":\"{}\",\"performance_governor\":{},\"max_jobs\":{},\"thinlto_jobs\":{},\"source_ref\":\"{}\",\"series\":\"{}\",\"kver\":\"{}\",\"base\":\"{}\",\"tunes\":{},\"overlays\":{},\"patch_sets\":{},\"extra_patches\":{},\"patch_strict\":{},\"output\":\"{}\"}}",
             self.distro.name(), self.flavor.key, json_escape(&self.kname), json_escape(&self.pkgrel), json_escape(self.out.as_deref().unwrap_or("")),
             json_escape(&self.cpu_target), json_escape(&self.hz), json_escape(&self.hugepages), self.performance_governor,
             self.max_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
             self.thinlto_jobs.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()),
-            json_escape(self.source_ref.as_deref().unwrap_or("")), json_escape(&self.base),
+            json_escape(self.source_ref.as_deref().unwrap_or("")), json_escape(&self.series),
+            json_escape(self.kver.as_deref().unwrap_or("")), json_escape(&self.base),
             arr(&self.tunes), arr(&self.overlays), arr(&self.patch_sets), arr(&self.extra_patches), self.patch_strict, json_escape(&self.output))
     }
 }
@@ -301,6 +328,12 @@ fn flags_multi<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
     v
 }
 
+/// A full kernel.org release number: exactly three numeric parts, e.g. 7.2.13.
+fn valid_kver(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.len() <= 4 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Validate + normalize the kernel name (becomes the pkgsuffix + LOCALVERSION + package filenames).
 fn kernel_name(s: &str) -> Result<String, String> {
     let n = s.trim().to_lowercase();
@@ -356,6 +389,23 @@ fn main() -> ExitCode {
         None => std::env::var("AKT_MAX_LTO_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0),
     };
     let source_ref = flag(&args, "--source-ref").map(str::to_string);
+    let series = flag(&args, "--series").unwrap_or("mainline");
+    let kver = flag(&args, "--kver").map(str::to_string);
+    if !matches!(series, "mainline" | "stable") {
+        eprintln!("akt: --series must be mainline or stable"); return ExitCode::FAILURE;
+    }
+    if let Some(v) = &kver {
+        if !valid_kver(v) {
+            eprintln!("akt: --kver must be a full kernel.org release such as 7.2.13"); return ExitCode::FAILURE;
+        }
+        if series != "stable" {
+            eprintln!("akt: --kver selects a stable release; use it with --series stable"); return ExitCode::FAILURE;
+        }
+    }
+    if series == "stable" && target_distro != Distro::Arch {
+        eprintln!("akt: --series stable applies to the Arch source recipe; Debian chooses its source package version");
+        return ExitCode::FAILURE;
+    }
     if let Some(ref_name) = &source_ref {
         let valid = !ref_name.is_empty() && ref_name.len() <= 200
             && ref_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
@@ -411,6 +461,7 @@ fn main() -> ExitCode {
                 .with_max_jobs(max_jobs)
                 .with_thinlto_jobs(thinlto_jobs)
                 .with_source_ref(source_ref.clone())
+                .with_series(series, kver.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             if json { println!("{}", p.to_json()); }
             else {
@@ -420,6 +471,7 @@ fn main() -> ExitCode {
                 for o in &p.overlays { println!("  overlay  : {o}"); }
                 for ps in &p.patch_sets { println!("  patches  : {ps}"); }
                 for ep in &p.extra_patches { println!("  +patch   : {ep}"); }
+                println!("  series   : {}", match p.kver.as_deref() { Some(v) => format!("{} {v}", p.series), None => p.series.clone() });
                 println!("  patch mode: {}", if p.patch_strict { "strict (fail-fast)" } else { "optional (skip on miss)" });
                 println!("  output   : {}", p.output);
             }
@@ -431,6 +483,7 @@ fn main() -> ExitCode {
                 .with_max_jobs(max_jobs)
                 .with_thinlto_jobs(thinlto_jobs)
                 .with_source_ref(source_ref.clone())
+                .with_series(series, kver.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             let (files, dirs) = build::collect_patches(&build::bundled_patch_dirs(p.distro), &p.extra_patches);
             if json {
@@ -467,16 +520,26 @@ fn main() -> ExitCode {
                 eprintln!("akt: --prepare-only requires an Arch-family host and Arch target, and cannot be combined with --dry-run");
                 return ExitCode::FAILURE;
             }
+            let configure_only = has_flag(&args, "--configure-only");
+            if configure_only && (dry || prepare_only || target_distro != Distro::Arch || host_distro != Distro::Arch) {
+                eprintln!("akt: --configure-only requires an Arch-family host and Arch target, and cannot be combined with --dry-run or --prepare-only");
+                return ExitCode::FAILURE;
+            }
+            if series == "stable" && kver.is_none() {
+                eprintln!("akt: --series stable needs --kver X.Y.Z (the kernel.org stable release to build, e.g. 7.2.13)");
+                return ExitCode::FAILURE;
+            }
             let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
                 .with_tuning(cpu_target, hz, hugepages, performance_governor)
                 .with_max_jobs(max_jobs)
                 .with_thinlto_jobs(thinlto_jobs)
                 .with_source_ref(source_ref.clone())
+                .with_series(series, kver.clone())
                 .with_patches(extra_patches.clone(), patch_strict);
             let result = if target_distro != host_distro && !dry && !prepare_only {
                 container_build::run(&plan, &args, host_distro)
             } else {
-                build::run(plan, dry, prepare_only)
+                build::run(plan, dry, prepare_only, configure_only)
             };
             match result {
                 Ok(_) => ExitCode::SUCCESS,
@@ -486,7 +549,8 @@ fn main() -> ExitCode {
         "install" => {
             // Installs into the RUNNING system, so the running kernel is made restorable first.
             let keep = !args.iter().any(|a| a == "--no-keep-running");
-            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel);
+            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_series(series, kver.clone());
             match install::install_to_system(&plan, keep) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: install failed: {e}"); ExitCode::FAILURE }
@@ -497,7 +561,8 @@ fn main() -> ExitCode {
                 eprintln!("akt: rollback operates on host-installed packages; do not set --target-distro for rollback");
                 return ExitCode::FAILURE;
             }
-            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel);
+            let plan = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
+                .with_series(series, kver.clone());
             match build::rollback(&plan) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => { eprintln!("akt: rollback failed: {e}"); ExitCode::FAILURE }
@@ -531,8 +596,9 @@ fn usage() -> String {
   patches [--patch P]    list every patch that will be applied, in order, for this host
   build  [--target-distro host|arch|debian] [--cpu-target auto|portable|v1|v2|v3|v4]
          [--hz HZ] [--hugepages madvise|always] [--max-jobs auto|N]
-         [--thinlto-jobs auto|N] [--source-ref REF] [--performance-governor]
-         [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P] [--dry-run | --prepare-only]
+         [--thinlto-jobs auto|N] [--source-ref REF] [--series mainline|stable --kver X.Y.Z]
+         [--performance-governor] [--flavor F] [--name NAME] [--pkgrel N] [--out DIR] [--patch P]
+         [--dry-run | --prepare-only | --configure-only]
                          build a kernel package; cross-distro builds use Podman/Docker
                          --name / --rename  builds linux-<NAME> (default: arxos)
                          --target-distro    host (default), arch, or debian; cross-target needs Podman/Docker
@@ -542,6 +608,12 @@ fn usage() -> String {
                          --max-jobs         auto lets the planner decide; N caps jobs and is further resource-limited
                          --thinlto-jobs     auto or independent ThinLTO link-backend cap
                          --source-ref       pin the Arch source recipe to a tag, branch, or commit; default tracks rolling source
+                         --series           mainline (default) follows the newest tuned source; stable builds an
+                                            older X.Y series: its last tuned source, brought to --kver with the
+                                            kernel.org stable updates, each verified against kernel.org's signed
+                                            checksum list before use (own workspace, so both can build side by side)
+                         --kver X.Y.Z       the stable release to build, e.g. 7.2.13 (required with --series stable)
+                         --configure-only   fetch, patch and configure, run the hardening gate, then stop before compiling
                          --performance-governor opt in to the performance governor default (not recommended for most laptops)
                          --pkgrel N         package revision / custom version (default: 1)
                          --out DIR          write the finished packages to DIR
