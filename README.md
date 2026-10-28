@@ -420,7 +420,7 @@ Distro detection reads `/etc/os-release`: `arxos`, `arch` or `upstream` map to t
 
 The QEMU boot test extracts the built package, boots its kernel with a minimal initramfs whose `/init` prints a marker and powers off, and passes only if the marker appears. It proves the kernel boots to a minimal userspace under emulation, nothing more.
 
-**Unit tests:** 26 tests cover the resource planner, cgroup limits, checksum synchronization, version ordering, the build lock, hardware-flag parsing and query decoding. Run them with `cargo test --locked`.
+**Unit tests:** 34 tests cover the resource planner, cgroup limits, checksum synchronization, version ordering, the build lock, hardware-flag parsing and query decoding. Run them with `cargo test --locked`.
 
 **VM tests:** the Python checks in `tests/` exercise the GUI hardening, the build lock and the release bundles, and must run only inside a disposable VM. See [`tests/hardening-vm.md`](tests/hardening-vm.md).
 

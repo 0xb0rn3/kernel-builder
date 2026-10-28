@@ -13,7 +13,7 @@ on:
           - full-build
         default: prepare-only
       source_ref:
-        description: "Optional CachyOS linux-cachyos tag, branch, or commit (blank = rolling latest)"
+        description: "Optional tuned upstream recipe tag, branch, or commit (blank = rolling latest)"
         required: false
         type: string
         default: ""
@@ -98,19 +98,22 @@ jobs:
               pacman -Syu --noconfirm --needed rust git clang llvm lld bc cpio pahole python sudo zstd
               if ! getent passwd builder >/dev/null 2>&1; then useradd --create-home builder; fi
               getent passwd builder
+              # runuser from util-linux 2.42 rejects this freshly created account inside the
+              # container ("does not contain all the required fields") although getent reads it,
+              # so drop privileges with sudo, which the image installs above.
               install -d -o builder -g builder /home/builder/.cache
               cargo build --release --locked
               mkdir -p /workspace/artifacts
               chown -R builder:builder /workspace/artifacts
               chmod 777 /workspace/artifacts
-              # Fetch CachyOS signing keys by full fingerprint. The PKGBUILD's validpgpkeys
+              # Fetch the tuned upstream recipe's signing keys by full fingerprint. The PKGBUILD's validpgpkeys
               # remains the trust anchor; no PGP checks are skipped.
-              runuser -u builder -- env HOME=/home/builder gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys E18447AC260021D31F3FF6C4C8A2A4774B8B63C4 E8B9AA39F054E30E8290D492C3C4820857F654FE
+              sudo -u builder -- env HOME=/home/builder gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys E18447AC260021D31F3FF6C4C8A2A4774B8B63C4 E8B9AA39F054E30E8290D492C3C4820857F654FE
               args=(build --target-distro arch --flavor "$KERNEL_FLAVOR" --name arxos --max-jobs 2 --thinlto-jobs 1 --cpu-target v2 --hz 500 --hugepages madvise --out /workspace/artifacts)
               if [[ "$RUN_MODE" == "dry-run" ]]; then args+=(--dry-run); fi
               if [[ "$RUN_MODE" == "prepare-only" ]]; then args+=(--prepare-only); fi
               if [[ -n "$SOURCE_REF" ]]; then args+=(--source-ref "$SOURCE_REF"); fi
-              runuser -u builder -- env HOME=/home/builder XDG_CACHE_HOME=/home/builder/.cache AKT_DATA_DIR=/workspace AKT_WORK=/home/builder/.cache/akt AKT_MAX_JOBS=2 AKT_MAX_LTO_JOBS=1 /workspace/target/release/akt "${args[@]}"
+              sudo -u builder -- env HOME=/home/builder XDG_CACHE_HOME=/home/builder/.cache AKT_DATA_DIR=/workspace AKT_WORK=/home/builder/.cache/akt AKT_MAX_JOBS=2 AKT_MAX_LTO_JOBS=1 /workspace/target/release/akt "${args[@]}"
             '
 
       - name: Boot the newly built kernel in QEMU

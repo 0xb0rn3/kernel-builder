@@ -1,28 +1,37 @@
-# akt v0.4.1
+# akt v0.5.2
 
-**Plan without the 60 GiB floor, and verify sources without compiling.** This release adds two ways to check a build before committing hours to it.
+**Build the stable series as well as mainline, install without losing the running kernel, and ship packages that describe themselves plainly.** This release covers everything since v0.4.1 (v0.5.0, v0.5.1 and v0.5.2).
 
 ## Highlights
 
-- 🧪 **`akt build --dry-run`** is plan-only. It checks the resource plan without requiring the 60 GiB full-build disk floor; available disk is still measured and reported.
-- 🔎 **`akt build --prepare-only`** (Arch only) fetches the upstream recipe and source files, synchronizes the active BLAKE2 checksum array from matching upstream `.SRCINFO` metadata, and runs `makepkg` source integrity and PGP-signature verification without compiling a kernel.
-- 🔑 The source-preparation CI workflow imports pinned upstream signing-key fingerprints. Signature checks are not disabled.
-- ⚙️ GitHub Actions can run a lightweight plan-only dry run, source preparation, or an explicit full kernel build with an optional QEMU boot smoke test.
-- 🐛 Fixed the resource-planning distinction between a lightweight dry run and a real kernel build.
+- 🌿 **`--series stable --kver X.Y.Z`** builds an older X.Y line at its current stable release. akt takes the last tuned recipe of that line and brings it forward with the kernel.org incremental stable updates. Each update is used only when kernel.org's checksum list carries a valid signature from its pinned checksum key, checked in a throwaway keyring, and the file matches that signed list. A mainline and a stable build have separate workspaces and locks, so both can run at the same time.
+- 🧾 **`--configure-only`** stops after the configuration gate, before compiling, so you can check a build's final configuration in minutes.
+- 📦 **`akt install`** puts a built kernel into the running system and keeps the kernel you are running. If no package file exists for the running version, akt first rebuilds one from the file list pacman records, and after the install it checks that the running module tree is still present.
+- 🏷️ **Plain package metadata.** akt rewrites only `.PKGINFO` and `.BUILDINFO`: a plain description, the akt URL, no other kernel in `provides` or `replaces`, and `/build` instead of your build directory. A package is replaced only when every payload file is byte-identical.
+- 🕒 **Real-time builds keep their name.** A real-time build is now `linux-<name>-rt`, never `linux-<name>-rt-gcc`. akt reads the package name makepkg will produce before it downloads anything and stops if it is not exactly `linux-<name>`.
+- 📜 **The GUI follows the whole build.** The log streams from the first line, with a follow toggle, a copy button and a resizable window. The GUI also has Install, Rollback, Resources, Patches and Gate, plus `--patch`, `--patch-optional` and `--prepare-only`.
+- 🛡️ **Network privacy in the config fragment.** Link-layer MAC rewrite and filtering, NAT and redirect for a transparent proxy, netfilter packet logging, SYN cookies, reverse-path filtering and IPv6 address privacy, plus the runtime sysctl drop-in `config/sysctl/90-arxos-network-anon.conf`.
+
+## Fixes
+
+- 🐛 x86-64-v3 detection: Linux reports the LZCNT bit as `abm`, not `lzcnt`, so every v3-capable machine was offered `x86-64-v2`. akt now accepts either spelling.
+- 🐛 A cached download from an older series could shadow a new major's download of the same name and fail the integrity check. akt now removes a cached download whose checksum no longer matches the recipe.
+- 🐛 A rolling build could silently keep an old recipe after a pinned build left the checkout detached. Rolling builds now fetch the tip and check it out detached.
+- 🐛 A multi-line value made the GUI's JSON responses invalid, so the live log stopped updating. Control characters are now escaped.
 
 ## Get it
 
 | Asset | What it is |
 |---|---|
-| `kernel-builder-v0.4.1-x86_64-linux.tar.gz` | Full bundle (binary, installer, config, patches, GUI). Built on Ubuntu 22.04 for glibc compatibility. |
-| `kernel-builder-v0.4.1-x86_64-linux-musl.tar.gz` | Same bundle with a static musl binary. |
+| `kernel-builder-v0.5.2-x86_64-linux.tar.gz` | Full bundle (binary, installer, config, patches, GUI). Built on Ubuntu 22.04 for glibc compatibility. |
+| `kernel-builder-v0.5.2-x86_64-linux-musl.tar.gz` | Same bundle with a static musl binary. |
 | `akt-x86_64-linux` | Bare glibc binary. |
 | `akt-x86_64-linux-musl` | Bare static binary. |
 | `SHA256SUMS` | Checksums for the four files above. |
 
 ```sh
 sha256sum --check SHA256SUMS
-tar xf kernel-builder-v0.4.1-x86_64-linux.tar.gz
+tar xf kernel-builder-v0.5.2-x86_64-linux.tar.gz
 cd kernel-builder && ./install.sh --user
 ```
 
@@ -30,17 +39,12 @@ Release bundles ship a compiled binary, so no Rust toolchain is needed to instal
 
 ## Validation notes
 
-- Rust compilation and unit tests passed in GitHub Actions for the prepare-only implementation.
-- A source-preparation run verified all five active BLAKE2 entries, including the kernel archive, config, DKMS patch, and BORE patch. CI's subsequent PGP/account setup run still failed before successful completion; a successful final prepare-only run is not yet confirmed.
-- No full kernel package build or QEMU boot test is claimed by these notes. Those remain separate validation steps and require sufficient runner disk space.
+- Unit tests pass with `cargo test --locked`.
+- Full kernel builds were made with this release on the reference laptop: a mainline 7.3.0 default build, a stable 7.2.13 default build (7.2.11 recipe brought to 7.2.13 with both signed updates), and a 7.3.0 real-time configure run that resolves the package name `linux-arxos-rt`. Each passed the configuration gate. The resulting kernels were boot-tested in disposable VMs with kernel taint 0.
+- The metadata step was checked on a 7.3.0 build: 6546 file digests identical before and after, and `pacman -Qkk` passes all files.
+- A wrong pinned key fingerprint for the stable updates is refused.
 
 ## Important limitations
 
 > [!WARNING]
 > Do not install a package from this tool on a daily-driver system until it has been inspected and the resulting kernel has been boot-tested in a disposable VM with a bootable fallback available.
-
-- This release is the kernel builder, not a prebuilt ArxOS kernel. Generated kernel packages depend on configuration, selected source, and hardware/module needs.
-- Kernel performance depends on workload and hardware; recommendations are conservative starting points, not benchmark claims or hardware-safety guarantees.
-- Arch and Debian kernel recipes have different feature availability. A missing BORE, BBRv3, LTO, real-time, or hardening option must not be treated as enabled unless the selected source verifies it.
-- Cross-target builds need Podman or Docker and network access to obtain the target image and build dependencies.
-- `SHA256SUMS` detects changed downloads but is not an independent signature.
