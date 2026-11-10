@@ -57,6 +57,20 @@ fn print_plan(p: &Plan) {
 }
 
 /// Run a shell step with live output in `dir` with extra env. Returns an error on non-zero exit.
+/// Fetch and verify the sources first, then extract. A large source over a slow or flaky link can
+/// drop mid-transfer (seen: GitHub reset the connection at 30 MB of 228 MB at 270 KB/s, and makepkg's
+/// curl does not retry a reset). makepkg keeps the partial file and resumes it on the next call, so a
+/// dropped download is retried up to eight times, each one continuing where the last stopped. Any
+/// other failure (a checksum or signature that does not match) stops at once: integrity stays
+/// fail-closed and is never retried into success.
+const FETCH_THEN_PREPARE: &str = "set -o pipefail; n=0; \
+until out=$(makepkg --verifysource --nodeps --noconfirm 2>&1 | tee /dev/stderr); do \
+  case \"$out\" in *'Failure while downloading'*) ;; *) exit 1 ;; esac; \
+  n=$((n+1)); [ $n -ge 8 ] && { echo 'akt: the source download kept failing (8 attempts)' >&2; exit 1; }; \
+  echo \"akt: the download stopped ($n/8); resuming where it left off in $((n*5)) s\" >&2; sleep $((n*5)); \
+done; \
+makepkg -o -C --nodeps --noconfirm";
+
 fn step(label: &str, dir: &Path, env: &[(&str, &str)], script: &str) -> io::Result<()> {
     println!(">> {label}");
     let mut c = Command::new("bash");
@@ -752,7 +766,7 @@ fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<
             "the recipe would build {resolved}, not linux-{}; refusing (package names must match the flavor)", p.kname)));
     }
     drop_stale_sources(basep, &env)?;
-    step("[3/5] extract + prepare", basep, &env, "makepkg -o -C --nodeps --noconfirm")?;
+    step("[3/5] extract + prepare", basep, &env, FETCH_THEN_PREPARE)?;
     if prepare_only {
         println!("[prepare-only] source downloads and makepkg integrity checks completed; kernel configuration, compilation, and packaging were not run.");
         return Ok(());
@@ -1288,6 +1302,14 @@ mod tests {
         assert!(st.success(), "embedded script has a syntax error");
         assert!(NEUTRAL_PKG_SCRIPT.contains("diff -q <(payload"), "payload identity check must stay");
         assert!(NEUTRAL_PKG_SCRIPT.contains("grep -qi cachy"), "fail-closed name check must stay");
+    }
+
+    #[test]
+    fn source_fetch_retries_downloads_only() {
+        assert!(FETCH_THEN_PREPARE.contains("makepkg --verifysource"));
+        assert!(FETCH_THEN_PREPARE.contains("*'Failure while downloading'*) ;; *) exit 1"), "only a dropped download is retried");
+        assert!(FETCH_THEN_PREPARE.ends_with("makepkg -o -C --nodeps --noconfirm"));
+        assert!(!FETCH_THEN_PREPARE.contains("skipinteg") && !FETCH_THEN_PREPARE.contains("skipchecksums"));
     }
 
     #[test]
