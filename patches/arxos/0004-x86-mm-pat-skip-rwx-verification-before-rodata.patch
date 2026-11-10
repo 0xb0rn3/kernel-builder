@@ -1,0 +1,27 @@
+x86/mm/pat: skip RWX verification until kernel text is set to read only
+
+A 7.3.x stable update (038176c21617, effective RW computation in
+lookup_address_in_pgd_attr) made verify_rwx() see the temporary RWX pages of
+the ITS thunks that apply_retpolines() allocates during early boot, and the
+kernel warned once and tainted itself (W) on every affected Intel CPU.
+This is the fix Mike Rapoport posted upstream (LKML, 2026-09); it is carried
+here until a stable release has it.
+
+--- a/arch/x86/mm/pat/set_memory.c
++++ b/arch/x86/mm/pat/set_memory.c
+@@ -708,6 +708,15 @@
+ 	if (!(__supported_pte_mask & _PAGE_NX))
+ 		return new;
+ 
++	/*
++	 * Skip verification until kernel text is set to read only: until
++	 * then all of kernel text is mapped RWX for alternatives patching,
++	 * and the temporary RWX pages of the ITS thunks are expected.
++	 * CONFIG_DEBUG_WX still checks every mapping once it is.
++	 */
++	if (!kernel_set_to_readonly)
++		return new;
++
+ 	if (!((pgprot_val(old) ^ pgprot_val(new)) & (_PAGE_RW | _PAGE_NX)))
+ 		return new;
+ 
