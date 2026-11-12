@@ -455,6 +455,16 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        "upstream" => {
+            match build::upstream_version() {
+                Ok((version, commit)) => {
+                    if json { println!("{{\"version\":\"{version}\",\"recipe\":\"{commit}\"}}"); }
+                    else { println!("{version}"); eprintln!("source recipe {commit}"); }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => { eprintln!("akt: upstream: {e}"); ExitCode::FAILURE }
+            }
+        }
         "plan" => {
             let p = Plan::resolve(target_distro, fl, &kname, out.as_deref(), &pkgrel)
                 .with_tuning(cpu_target, hz, hugepages, performance_governor)
@@ -593,6 +603,7 @@ fn usage() -> String {
   system [--json]        detect hardware and show build recommendations
   resources [--json]      inspect build CPU, RAM and disk limits (AKT_WORK path)
   plan   [--target-distro host|arch|debian] [--flavor F] print the selected plan
+  upstream [--json]      the kernel version a rolling build would produce now (no download)
   patches [--patch P]    list every patch that will be applied, in order, for this host
   build  [--target-distro host|arch|debian] [--cpu-target auto|portable|v1|v2|v3|v4]
          [--hz HZ] [--hugepages madvise|always] [--max-jobs auto|N]

@@ -203,7 +203,62 @@ pub fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
         .join(format!("{}-{flavor}", distro.name())))
 }
 
+/// The kernel version a rolling build would produce right now, and the recipe commit it comes
+/// from. Reads only the recipe's version fields from the source host; downloads no sources.
+/// A scheduled job compares this with what was last built to decide whether to build.
+pub fn upstream_version() -> io::Result<(String, String)> {
+    let out = |args: &[&str]| -> io::Result<String> {
+        let o = Command::new(args[0]).args(&args[1..]).output()?;
+        if !o.status.success() {
+            return Err(io::Error::new(io::ErrorKind::Other, format!("{} failed: {}", args[0], String::from_utf8_lossy(&o.stderr).trim())));
+        }
+        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let head = out(&["git", "ls-remote", "https://github.com/CachyOS/linux-cachyos.git", "HEAD"])?;
+    let commit = head.split_whitespace().next().unwrap_or("").to_string();
+    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "the source recipe did not report a commit"));
+    }
+    let url = format!("https://raw.githubusercontent.com/CachyOS/linux-cachyos/{commit}/linux-cachyos/PKGBUILD");
+    let recipe = out(&["curl", "-fsSL", "--retry", "3", "--max-time", "60", &url])?;
+    let version = upstream_from_recipe(&recipe)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the source recipe has no readable version"))?;
+    Ok((version, commit))
+}
+
+/// `_major=7.3` + `_minor=4` -> "7.3.4" (a first release has `_minor=0` and is "7.3.0").
+fn upstream_from_recipe(recipe: &str) -> Option<String> {
+    let major = recipe_field(recipe, "_major")?;
+    let minor = recipe_field(recipe, "_minor")?;
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.');
+    (ok(&major) && ok(&minor) && !minor.contains('.')).then(|| format!("{major}.{minor}"))
+}
+
+/// A package transaction in progress on this machine, if any. A kernel build runs for hours and
+/// calls the system's tools the whole time; a system update that replaces one of them mid-build
+/// fails the compile on the spot (2026-11-10: coreutils was upgraded and the build died three
+/// hours in on "mv: command not found").
+pub fn package_transaction_running() -> Option<&'static str> {
+    if Path::new("/var/lib/pacman/db.lck").exists() { return Some("pacman/arx (database lock /var/lib/pacman/db.lck)"); }
+    // dpkg's lock files always exist, so on Debian-family hosts the running tools are the signal
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        if !e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) { continue; }
+        match std::fs::read_to_string(e.path().join("comm")).unwrap_or_default().trim() {
+            "apt" | "apt-get" | "dpkg" | "aptitude" | "unattended-upgr" => return Some("apt/dpkg"),
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn run(plan: Plan, dry: bool, prepare_only: bool, configure_only: bool) -> io::Result<()> {
+    if !dry {
+        if let Some(who) = package_transaction_running() {
+            return Err(io::Error::new(io::ErrorKind::ResourceBusy, format!(
+                "a package transaction is running ({who}). Wait for it to finish, and do not update the system while a kernel builds: the build uses the system's tools for hours and fails when one is replaced under it")));
+        }
+        println!("note: do not update this system while the kernel builds (a replaced tool fails the compile).");
+    }
     if plan.distro == Distro::Unknown {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported host (need Arch- or Debian-family)"));
     }
@@ -1318,6 +1373,14 @@ mod tests {
         assert_eq!(split_kver("6.18.0"), Some(("6.18".to_string(), 0)));
         assert_eq!(split_kver("7.2"), None);
         assert_eq!(split_kver("7.2.x"), None);
+    }
+
+    #[test]
+    fn upstream_version_comes_from_the_recipe_fields() {
+        assert_eq!(upstream_from_recipe("_major=7.3\n_minor=4\n").as_deref(), Some("7.3.4"));
+        assert_eq!(upstream_from_recipe("_major=7.4\n_minor=0\n").as_deref(), Some("7.4.0"));
+        assert_eq!(upstream_from_recipe("_major=7.3\n"), None);
+        assert_eq!(upstream_from_recipe("_major=$(evil)\n_minor=1\n"), None, "only digits and dots are a version");
     }
 
     #[test]

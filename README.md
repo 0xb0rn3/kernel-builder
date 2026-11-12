@@ -122,6 +122,7 @@ flowchart LR
 | `akt system` | Hardware inventory with per-machine recommendations. Alias: `recommend`. |
 | `akt resources` | CPU, RAM, cgroup and disk build plan for the `AKT_WORK` directory. Applies the full-build 60 GiB disk floor, so it errors on a smaller disk; use `build --dry-run` to see a plan regardless. |
 | `akt plan` | Print the resolved plan. Builds nothing. |
+| `akt upstream` | The kernel version a rolling build would produce now, and its source commit. Downloads no sources. `--json` for scripts. |
 | `akt patches` | List every patch that would be applied, in order. |
 | `akt explain` | Plain-English meaning of each performance, hardening and security option. |
 | `akt build` | Build a kernel package. Supports `--dry-run`, `--prepare-only` and `--configure-only`. |
@@ -416,11 +417,12 @@ Distro detection reads `/etc/os-release`: `arxos`, `arch` or `upstream` map to t
 |---|---|---|
 | `ci.yml` | pull requests, pushes to `main` | Syntax-checks the shell scripts, then `cargo check`, `cargo test` and a release build, all `--locked`. |
 | `kernel-live-test.yml` | manual, or a push touching source, config, patches or tooling | In an Arch container: `dry-run`, `prepare-only` (default) or `full-build` of the chosen flavor, with an optional QEMU boot test. Pushes run `prepare-only`. |
+| `kernel-release.yml` | every four hours, or manual | Asks `akt upstream` for the version a build would produce now. When that version has no `kernels-<version>-<rel>` release yet, builds `linux-arxos` and `linux-arxos-rt` with the release profile (x86-64-v3, 1000 Hz, the bundled patches), both pinned to one source commit, runs the hardening gate on the packaged configuration and a boot that must reach userspace with taint 0, lockdown in integrity mode and no warning, then publishes the four packages with `SHA256SUMS`. |
 | `release.yml` | tags `v*`, pushes to `main`, manual | Requires the tag to match the `Cargo.toml` version, never overwrites an existing release, builds a glibc binary on Ubuntu 22.04 and a static musl binary, packages them with `tools/package-release.sh`, verifies `SHA256SUMS`, and publishes. |
 
 The QEMU boot test extracts the built package, boots its kernel with a minimal initramfs whose `/init` prints a marker and powers off, and passes only if the marker appears. It proves the kernel boots to a minimal userspace under emulation, nothing more.
 
-**Unit tests:** 34 tests cover the resource planner, cgroup limits, checksum synchronization, version ordering, the build lock, hardware-flag parsing and query decoding. Run them with `cargo test --locked`.
+**Unit tests:** 36 tests cover the resource planner, cgroup limits, checksum synchronization, version ordering, the build lock, hardware-flag parsing and query decoding. Run them with `cargo test --locked`.
 
 **VM tests:** the Python checks in `tests/` exercise the GUI hardening, the build lock and the release bundles, and must run only inside a disposable VM. See [`tests/hardening-vm.md`](tests/hardening-vm.md).
 

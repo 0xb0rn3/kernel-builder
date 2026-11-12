@@ -23,7 +23,10 @@ fn calculate_with_disk_policy(cpus: usize, available: u64, disk: u64, cap: Optio
     let reserve = (available / 4).clamp(512 * MIB, 4 * GIB);
     let memory_jobs = available.saturating_sub(reserve) / (2 * GIB);
     if memory_jobs == 0 { return Err(invalid("not enough available RAM: need 2 GiB per job plus host reserve")); }
-    if require_build_disk && disk < 60 * GIB { return Err(invalid("kernel work filesystem needs at least 60 GiB free")); }
+    // 60 GiB by default (a build tree is about 30 GiB, plus sources, packages and headroom).
+    // AKT_MIN_DISK_GIB lowers it for a build host that is known to be enough, never below 40.
+    let floor = std::env::var("AKT_MIN_DISK_GIB").ok().and_then(|v| v.parse::<u64>().ok()).map(|g| g.clamp(40, 60)).unwrap_or(60);
+    if require_build_disk && disk < floor * GIB { return Err(invalid(&format!("kernel work filesystem needs at least {floor} GiB free"))); }
     // Leave one logical CPU of headroom when possible. Never raise the user's cap.
     let jobs = cpus.saturating_sub(1).max(1).min(memory_jobs as usize).min(cap.unwrap_or(usize::MAX));
     Ok(Resources { cpus, available, reserve, disk, jobs, link_jobs: jobs.min(4) })

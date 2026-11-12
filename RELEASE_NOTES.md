@@ -1,8 +1,17 @@
-# akt v0.5.3
+# akt v0.5.4
 
-**Wireless injection and software-defined radio in every ArxOS kernel, and a CI kernel job that runs again.** This release follows v0.5.3.
+**Kernels build themselves when upstream releases, and three build failures are closed.** This release follows v0.5.3.
 
 ## Highlights
+
+- 🤖 **Automatic kernel builds.** A scheduled job asks `akt upstream` which version a build would produce now; when that version has no release yet, `linux-arxos` and `linux-arxos-rt` are built with the release profile on GitHub runners, both pinned to one source commit, and published with their SHA-256 sums.
+- ✅ **A package is released only after it boots clean.** Each build passes the hardening gate on the configuration inside the package, then a real boot that must reach userspace with taint 0, lockdown in integrity mode and no warning in the kernel log.
+- 🩹 **A false W^X warning no longer taints the kernel.** A 7.3.x stable update made early boot warn about the temporary pages of the ITS mitigation on Intel CPUs and mark the kernel tainted. `patches/arxos/0004` carries the fix posted upstream until a stable release has it.
+- 🔁 **A dropped source download resumes.** A connection reset in the middle of a large source used to fail the build; it is retried up to eight times, continuing where it stopped. A checksum or signature that does not match still stops at once.
+- 🛑 **No build during a package update.** akt refuses to start while a package transaction is running: a system update that replaces a tool mid-compile fails the build hours in.
+- `akt upstream [--json]` prints the kernel version a rolling build would produce, without downloading sources.
+
+## Earlier: v0.5.3
 
 - 📡 **Injected frames are sent as they were built.** `patches/arxos/0001` stops mac80211 renumbering the sequence of an injected frame and lets it go out without waiting for an acknowledgement, which is what frame-injection tools expect on top of the kernel's native injection support.
 - 🛰️ **Software-defined radio receivers.** The config fragment now builds the HackRF, Airspy, MSI2500 with its MSi001 tuner and RTL2832 SDR drivers, all as modules, so they cost nothing until a radio is attached.
