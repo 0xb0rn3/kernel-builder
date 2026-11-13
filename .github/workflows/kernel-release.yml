@@ -8,9 +8,9 @@ name: Build ARXOS kernels when upstream releases
 # Both flavours are pinned to the same source commit, so an upstream release that lands in the
 # middle of a run cannot give the two packages different versions.
 
+# The ARXOS kernels are built and released by thearxos/arxos-kernels (kernel-build.yml), which
+# pins this tool to a commit. Here the workflow runs only on demand, to test a change to akt.
 on:
-  schedule:
-    - cron: "17 */4 * * *"
   workflow_dispatch:
     inputs:
       force:
