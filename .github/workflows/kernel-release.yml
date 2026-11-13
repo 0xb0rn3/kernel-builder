@@ -152,14 +152,22 @@ jobs:
           kernel=$(find "$tmp" -name vmlinuz -print -quit)
           root="$tmp/root"; mkdir -p "$root"/{bin,proc,sys,dev}
           cp /usr/bin/busybox "$root/bin/busybox"
+          # The results go to the second serial port, which nothing else writes to: on the first
+          # one, kernel messages printed at the same moment cut into them.
           cat > "$root/init" <<'EOF'
           #!/bin/busybox sh
           /bin/busybox mount -t proc proc /proc
           /bin/busybox mount -t sysfs sys /sys
+          /bin/busybox mount -t devtmpfs dev /dev
           /bin/busybox mount -t securityfs securityfs /sys/kernel/security
-          echo "KBOOT uname=$(/bin/busybox uname -r) taint=$(/bin/busybox cat /proc/sys/kernel/tainted) lockdown=$(/bin/busybox cat /sys/kernel/security/lockdown)"
-          echo "KBOOT build=$(/bin/busybox uname -v)"
-          echo "KBOOT userspace=ok"
+          {
+            echo "KBOOT uname=$(/bin/busybox uname -r)"
+            echo "KBOOT taint=$(/bin/busybox cat /proc/sys/kernel/tainted)"
+            echo "KBOOT lockdown=$(/bin/busybox cat /sys/kernel/security/lockdown)"
+            echo "KBOOT build=$(/bin/busybox uname -v)"
+            echo "KBOOT userspace=ok"
+          } > /dev/ttyS1
+          /bin/busybox sync
           /bin/busybox poweroff -f
           EOF
           sed -i 's/^          //' "$root/init"; chmod +x "$root/init"
@@ -167,15 +175,22 @@ jobs:
           # hardware virtualisation when the runner offers it, emulation otherwise (x86-64-v3 both ways)
           accel=(-accel tcg -cpu max); budget=900
           if [ -e /dev/kvm ] && sudo chmod 666 /dev/kvm 2>/dev/null; then accel=(-enable-kvm -cpu host); budget=180; fi
-          log="artifacts/${PACKAGE}-boot.log"
-          timeout "$budget" qemu-system-x86_64 "${accel[@]}" -m 2048 -smp 2 -nographic -no-reboot -nic none \
+          log="artifacts/${PACKAGE}-boot.log"; res="artifacts/${PACKAGE}-boot-result.txt"
+          timeout "$budget" qemu-system-x86_64 "${accel[@]}" -m 2048 -smp 2 -display none -no-reboot -nic none \
+            -monitor none -serial "file:$log" -serial "file:$tmp/result.raw" \
             -kernel "$kernel" -initrd "$tmp/initrd.gz" \
-            -append "console=ttyS0 ignore_loglevel panic=1 lockdown=integrity rdinit=/init" > "$log" 2>&1 || true
-          grep -a "KBOOT" "$log" || { tail -40 "$log"; echo "the kernel did not reach userspace" >&2; exit 1; }
-          grep -aq "KBOOT userspace=ok" "$log"
-          grep -aq "taint=0 " "$log" || { grep -a -E "WARNING:|BUG:|Oops|cut here" "$log" | head; echo "the kernel is tainted" >&2; exit 1; }
-          grep -aq "lockdown=none \[integrity\]" "$log" || { echo "lockdown is not in integrity mode" >&2; exit 1; }
-          if grep -a -E "WARNING:|BUG:|Oops|Kernel panic" "$log"; then echo "the kernel log holds a warning" >&2; exit 1; fi
+            -append "console=ttyS0 ignore_loglevel panic=1 lockdown=integrity rdinit=/init" || true
+          # a serial line ends in CR LF
+          tr -d '\r' < "$tmp/result.raw" > "$res" 2>/dev/null || : > "$res"
+          cat "$res"
+          grep -aqx "KBOOT userspace=ok" "$res" 2>/dev/null || { tail -40 "$log"; echo "the kernel did not reach userspace" >&2; exit 1; }
+          grep -aqx "KBOOT uname=${VERSION}-${PKGREL}-${KERNEL_NAME}" "$res" || { echo "the booted kernel is not ${VERSION}-${PKGREL}-${KERNEL_NAME}" >&2; exit 1; }
+          # A kernel warning or crash prints one of these. Hardware advisories ("Speculative Return
+          # Stack Overflow: WARNING: See ...", about the runner's CPU) are not kernel faults.
+          splat='WARNING: CPU:|\[ cut here \]|BUG:|Oops|Kernel panic|Call Trace:'
+          grep -aqx "KBOOT taint=0" "$res" || { grep -a -E "$splat" "$log" | head; echo "the kernel is tainted" >&2; exit 1; }
+          grep -aqx "KBOOT lockdown=none \[integrity\] confidentiality" "$res" || { echo "lockdown is not in integrity mode" >&2; exit 1; }
+          if grep -a -E "$splat" "$log"; then echo "the kernel log holds a warning" >&2; exit 1; fi
           echo "PASS: ${PACKAGE} ${VERSION}-${PKGREL} boots with taint 0, lockdown integrity, no warnings" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the packages
