@@ -62,13 +62,17 @@ fn print_plan(p: &Plan) {
 /// curl does not retry a reset). makepkg keeps the partial file and resumes it on the next call, so a
 /// dropped download is retried up to eight times, each one continuing where the last stopped. Any
 /// other failure (a checksum or signature that does not match) stops at once: integrity stays
-/// fail-closed and is never retried into success.
-const FETCH_THEN_PREPARE: &str = "set -o pipefail; n=0; \
-until out=$(makepkg --verifysource --nodeps --noconfirm 2>&1 | tee /dev/stderr); do \
-  case \"$out\" in *'Failure while downloading'*) ;; *) exit 1 ;; esac; \
-  n=$((n+1)); [ $n -ge 8 ] && { echo 'akt: the source download kept failing (8 attempts)' >&2; exit 1; }; \
+/// fail-closed and is never retried into success. The output goes through a temporary file, not
+/// /dev/stderr: an unprivileged build user in a container cannot open that, and the step then
+/// failed before fetching anything (the first CI release build, 2026-11-12).
+const FETCH_THEN_PREPARE: &str = "n=0; log=$(mktemp); \
+while :; do \
+  makepkg --verifysource --nodeps --noconfirm 2>&1 | tee \"$log\"; rc=${PIPESTATUS[0]}; \
+  [ \"$rc\" -eq 0 ] && break; \
+  grep -q 'Failure while downloading' \"$log\" || { rm -f \"$log\"; exit 1; }; \
+  n=$((n+1)); [ $n -ge 8 ] && { rm -f \"$log\"; echo 'akt: the source download kept failing (8 attempts)' >&2; exit 1; }; \
   echo \"akt: the download stopped ($n/8); resuming where it left off in $((n*5)) s\" >&2; sleep $((n*5)); \
-done; \
+done; rm -f \"$log\"; \
 makepkg -o -C --nodeps --noconfirm";
 
 fn step(label: &str, dir: &Path, env: &[(&str, &str)], script: &str) -> io::Result<()> {
@@ -1362,7 +1366,8 @@ mod tests {
     #[test]
     fn source_fetch_retries_downloads_only() {
         assert!(FETCH_THEN_PREPARE.contains("makepkg --verifysource"));
-        assert!(FETCH_THEN_PREPARE.contains("*'Failure while downloading'*) ;; *) exit 1"), "only a dropped download is retried");
+        assert!(FETCH_THEN_PREPARE.contains("grep -q 'Failure while downloading' \"$log\" || { rm -f \"$log\"; exit 1; }"), "only a dropped download is retried");
+        assert!(!FETCH_THEN_PREPARE.contains("/dev/stderr"), "a build user in a container cannot open /dev/stderr");
         assert!(FETCH_THEN_PREPARE.ends_with("makepkg -o -C --nodeps --noconfirm"));
         assert!(!FETCH_THEN_PREPARE.contains("skipinteg") && !FETCH_THEN_PREPARE.contains("skipchecksums"));
     }
