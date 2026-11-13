@@ -207,6 +207,36 @@ pub fn work_dir(distro: Distro, flavor: &str) -> io::Result<PathBuf> {
         .join(format!("{}-{flavor}", distro.name())))
 }
 
+/// Rewrite every `pahole>=X` in the recipe to the installed pahole's version (epoch and upstream
+/// version, no pkgrel). No pahole installed: the constraint is left as the recipe wrote it.
+fn pin_pahole(pkgbuild: &Path) -> io::Result<()> {
+    let out = Command::new("pacman").args(["-Q", "pahole"]).output();
+    let Some(ver) = out.ok().filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).map(str::to_string)) else { return Ok(()) };
+    let have = ver.rsplit_once('-').map(|(v, _)| v.to_string()).unwrap_or(ver);
+    let text = std::fs::read_to_string(pkgbuild)?;
+    let fixed = pin_pahole_text(&text, &have);
+    if fixed != text {
+        std::fs::write(pkgbuild, fixed)?;
+        println!("akt: pahole dependency set to the version this build uses (>={have})");
+    }
+    Ok(())
+}
+
+fn pin_pahole_text(text: &str, have: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("pahole>=") {
+        out.push_str(&rest[..i + "pahole>=".len()]);
+        let tail = &rest[i + "pahole>=".len()..];
+        let end = tail.find(|c: char| c == '\'' || c == '"' || c.is_whitespace() || c == ')').unwrap_or(tail.len());
+        out.push_str(have);
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The kernel version a rolling build would produce right now, and the recipe commit it comes
 /// from. Reads only the recipe's version fields from the source host; downloads no sources.
 /// A scheduled job compares this with what was last built to decide whether to build.
@@ -814,6 +844,11 @@ fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<
         "sed -i \"s/_pkgsuffix=cachyos/_pkgsuffix=$KNAME/g; s/KBUILD_BUILD_HOST=cachyos/KBUILD_BUILD_HOST=$KNAME/\" PKGBUILD; \
          sed -i \"s/^pkgrel=.*/pkgrel=${ARXOS_PKGREL:-1}/\" PKGBUILD; \
          if [ -n \"$ARXOS_KVER\" ]; then sed -i \"s/^pkgver=.*/pkgver=$ARXOS_KVER/\" PKGBUILD; fi")?;
+    // The recipe can ask for a pahole release newer than the distribution ships (7.3.4 asked for
+    // 1:1.32-2 while Arch had 1:1.32-1). The headers package then carries a dependency no system
+    // can meet and cannot be installed anywhere. The constraint is set to the pahole this build
+    // really uses, which is what produced the BTF in the package.
+    pin_pahole(&basep.join("PKGBUILD"))?;
 
     // 3. extract + prepare. NO --skipinteg: makepkg verifies the recipe's source checksums against
     //    what it downloaded (fail-closed on a tampered/mismatched source), matching the private
@@ -1386,6 +1421,15 @@ mod tests {
         assert_eq!(upstream_from_recipe("_major=7.4\n_minor=0\n").as_deref(), Some("7.4.0"));
         assert_eq!(upstream_from_recipe("_major=7.3\n"), None);
         assert_eq!(upstream_from_recipe("_major=$(evil)\n_minor=1\n"), None, "only digits and dots are a version");
+    }
+
+    #[test]
+    fn pahole_constraint_follows_the_installed_version() {
+        let r = "makedepends+=(clang llvm lld 'pahole>=1:1.32-2')\n        depends+=(clang llvm lld 'pahole>=1:1.32-2')\n    depends=('pahole' x)\n";
+        let f = pin_pahole_text(r, "1:1.32");
+        assert_eq!(f.matches("'pahole>=1:1.32'").count(), 2);
+        assert!(f.contains("depends=('pahole' x)"), "a plain dependency stays");
+        assert_eq!(pin_pahole_text("no constraint here", "1:1.32"), "no constraint here");
     }
 
     #[test]
