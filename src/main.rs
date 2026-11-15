@@ -52,6 +52,9 @@ pub const FLAVORS: &[Flavor] = &[
     Flavor { key: "default",  sched: "bore",     lto: "thin", about: "balanced daily driver (BORE + ThinLTO)" },
     Flavor { key: "rt",       sched: "rt-bore",  lto: "none", about: "real-time (PREEMPT_RT + BORE; RT and LTO do not mix)" },
     Flavor { key: "hardened", sched: "hardened", lto: "thin", about: "max security posture (KSPP + kCFI)" },
+    // For games: the same hardened base with what games and Wine/Proton gain from. Huge pages always
+    // on, the performance governor by default, NTSYNC built in, sched-ext kept for scx schedulers.
+    Flavor { key: "zen",      sched: "bore",     lto: "thin", about: "gaming (BORE + ThinLTO, huge pages always, performance governor, NTSYNC built in)" },
 ];
 pub fn flavor(key: &str) -> Option<&'static Flavor> { FLAVORS.iter().find(|f| f.key == key) }
 
@@ -163,6 +166,11 @@ impl Plan {
         self.hz = hz.to_string();
         self.hugepages = hugepages.to_string();
         self.performance_governor = performance_governor;
+        // the gaming flavor fixes these two: they are what it is
+        if self.flavor.key == "zen" {
+            self.hugepages = "always".into();
+            self.performance_governor = true;
+        }
         if !self.tunes.is_empty() {
             let target = if cpu_target == "auto" {
                 crate::sysinfo::SystemInfo::detect(std::path::Path::new(".")).recommended_cpu_target()

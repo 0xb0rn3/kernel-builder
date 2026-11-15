@@ -656,6 +656,7 @@ fn package_traits(p: &Plan) -> String {
     if matches!(p.flavor.sched, "bore" | "rt-bore" | "hardened") { t.push("BORE scheduler"); }
     if p.flavor.lto == "thin" { t.push("ThinLTO"); }
     if p.flavor.key == "hardened" { t.push("kCFI"); }
+    if p.flavor.key == "zen" { t.push("gaming: huge pages always, performance governor, NTSYNC"); }
     t.push("hardened");
     t.join(", ")
 }
@@ -741,8 +742,15 @@ fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level:
     if p.flavor.lto == "thin" && !has("CONFIG_LTO_CLANG_THIN=y") {
         return Err(fail("CONFIG_LTO_CLANG_THIN=y"));
     }
+    if p.flavor.key == "zen" {
+        for want in ["CONFIG_NTSYNC=y", "CONFIG_SCHED_CLASS_EXT=y", "CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=y",
+                     "CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y"] {
+            if !has(want) { return Err(fail(&format!("{want} (gaming flavor)"))); }
+        }
+    }
     if p.flavor.key == "hardened" {
-        if !has("CONFIG_CFI_CLANG=y") { return Err(fail("CONFIG_CFI_CLANG=y (hardened/kCFI profile)")); }
+        // the option was renamed from CFI_CLANG to CFI upstream; either one is kCFI
+        if !has("CONFIG_CFI_CLANG=y") && !has("CONFIG_CFI=y") { return Err(fail("CONFIG_CFI=y (hardened/kCFI profile)")); }
         if !has("CONFIG_CFI_AUTO_DEFAULT=y") { return Err(fail("CONFIG_CFI_AUTO_DEFAULT=y (hardened/kCFI profile)")); }
     }
     if p.distro == Distro::Arch && matches!(p.flavor.sched, "bore" | "rt-bore" | "hardened")
@@ -884,8 +892,10 @@ fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<
     let frag_str = frag.display().to_string();
     let mut env4 = env.to_vec();
     env4.push(("ARXOS_FRAG", frag_str.as_str()));
+    env4.push(("ARXOS_FLAVOR", p.flavor.key));
     step("[4/5] overlay ARXOS config + verify hardening delta", Path::new(&kdir), &env4,
         "./scripts/kconfig/merge_config.sh -m .config \"$ARXOS_FRAG\"; ./scripts/config -d RUST; make LLVM=1 olddefconfig; \
+         if [ \"$ARXOS_FLAVOR\" = zen ]; then ./scripts/config --enable NTSYNC --enable SCHED_CLASS_EXT; fi; \
          ./scripts/config --enable INIT_ON_FREE_DEFAULT_ON --enable INIT_ON_ALLOC_DEFAULT_ON --disable HIBERNATION \
            --enable INTEL_IOMMU_DEFAULT_ON --enable IOMMU_DEFAULT_DMA_STRICT --enable SECURITY_LOCKDOWN_LSM_EARLY \
            --enable INTEGRITY --enable IMA --enable IMA_DEFAULT_HASH_SHA256 --enable SECURITY_DMESG_RESTRICT \
@@ -1204,7 +1214,7 @@ fn build_debian(p: &Plan) -> io::Result<()> {
          if [ \"$ARXOS_LTO\" = thin ]; then ./scripts/config --enable LTO_CLANG_THIN; else ./scripts/config --disable LTO_CLANG_THIN --disable LTO_CLANG_FULL; fi; \
          if [ \"$ARXOS_FLAVOR\" = rt ]; then ./scripts/config --enable PREEMPT_RT --disable LTO_CLANG_THIN --disable LTO_CLANG_FULL; fi; \
          if [ \"$ARXOS_FLAVOR\" = hardened ]; then \
-           if grep -q '^CONFIG_ARCH_SUPPORTS_CFI_CLANG=y' .config; then ./scripts/config --enable CFI_CLANG --enable CFI_AUTO_DEFAULT; \
+           if grep -Eq '^CONFIG_ARCH_SUPPORTS_CFI(_CLANG)?=y' .config; then ./scripts/config --enable CFI_CLANG --enable CFI --enable CFI_AUTO_DEFAULT; \
            else echo 'ERROR: hardened flavor requested kCFI, but this source config does not support it' >&2; exit 8; fi; \
          fi; \
          make LLVM=1 olddefconfig")?;
@@ -1388,6 +1398,7 @@ mod tests {
         assert_eq!(package_traits(&plan("default")), "BORE scheduler, ThinLTO, hardened");
         assert_eq!(package_traits(&plan("rt")), "PREEMPT_RT, BORE scheduler, hardened");
         assert_eq!(package_traits(&plan("hardened")), "BORE scheduler, ThinLTO, kCFI, hardened");
+        assert_eq!(package_traits(&plan("zen")), "BORE scheduler, ThinLTO, gaming: huge pages always, performance governor, NTSYNC, hardened");
     }
 
     #[test]
