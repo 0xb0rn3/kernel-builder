@@ -39,7 +39,7 @@ jobs:
       tag: ${{ steps.up.outputs.tag }}
       build: ${{ steps.up.outputs.build }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build akt
         run: cargo build --release --locked
       - name: Compare upstream with what is released here
@@ -84,7 +84,7 @@ jobs:
       VERSION: ${{ needs.check.outputs.version }}
       PKGREL: ${{ inputs.pkgrel || '1' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Reclaim runner disk space
         run: |
