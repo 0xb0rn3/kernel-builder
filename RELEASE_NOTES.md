@@ -1,8 +1,17 @@
-# akt v0.5.4
+# akt v0.5.6
 
-**Kernels build themselves when upstream releases, and three build failures are closed.** This release follows v0.5.3.
+**A config option that Kconfig drops now stops the build, and the gaming flavor leaves the CPU governor to you.** This release follows v0.5.4.
 
 ## Highlights
+
+- 🧱 **Every line of the ArxOS config fragment must survive.** Kconfig drops an option without a word when a dependency is missing or the option no longer exists upstream. akt now compares the resolved configuration with the fragment, line by line, before it compiles, and stops with the line number and the value that was built. The check found four stale lines (one option removed upstream, two that can only be modules) and one driver that was patched in but never built.
+- 🖐️ **The D-WAV USB multitouch driver is built.** `patches/arxos/0003` added the driver in v0.5.3, but the fragment never enabled it, so no ArxOS kernel carried it. It is now a module.
+- 🎮 **`zen`, the gaming flavor** (new in v0.5.5): huge pages always, NTSYNC built in for Windows games under Wine and Proton, sched-ext kept so a scheduler can be swapped in at run time. From this release it no longer builds in the performance governor, which costs battery all day on a laptop; ArxOS offers that as a Control Center switch, and `--performance-governor` still builds it in for anyone who wants it.
+- 📡 The real-time flavor cannot have the legacy iptables tables: upstream builds them only without PREEMPT_RT. Its NAT and masquerade come from nftables, which the check still requires.
+
+## Earlier: v0.5.4
+
+**Kernels build themselves when upstream releases, and three build failures are closed.**
 
 - 🤖 **Automatic kernel builds.** A scheduled job asks `akt upstream` which version a build would produce now; when that version has no release yet, `linux-arxos` and `linux-arxos-rt` are built with the release profile on GitHub runners, both pinned to one source commit, and published with their SHA-256 sums.
 - ✅ **A package is released only after it boots clean.** Each build passes the hardening gate on the configuration inside the package, then a real boot that must reach userspace with taint 0, lockdown in integrity mode and no warning in the kernel log.
@@ -27,15 +36,15 @@
 
 | Asset | What it is |
 |---|---|
-| `kernel-builder-v0.5.3-x86_64-linux.tar.gz` | Full bundle (binary, installer, config, patches, GUI). Built on Ubuntu 22.04 for glibc compatibility. |
-| `kernel-builder-v0.5.3-x86_64-linux-musl.tar.gz` | Same bundle with a static musl binary. |
+| `kernel-builder-v0.5.6-x86_64-linux.tar.gz` | Full bundle (binary, installer, config, patches, GUI). Built on Ubuntu 22.04 for glibc compatibility. |
+| `kernel-builder-v0.5.6-x86_64-linux-musl.tar.gz` | Same bundle with a static musl binary. |
 | `akt-x86_64-linux` | Bare glibc binary. |
 | `akt-x86_64-linux-musl` | Bare static binary. |
 | `SHA256SUMS` | Checksums for the four files above. |
 
 ```sh
 sha256sum --check SHA256SUMS
-tar xf kernel-builder-v0.5.3-x86_64-linux.tar.gz
+tar xf kernel-builder-v0.5.6-x86_64-linux.tar.gz
 cd kernel-builder && ./install.sh --user
 ```
 
@@ -44,8 +53,8 @@ Release bundles ship a compiled binary, so no Rust toolchain is needed to instal
 ## Validation notes
 
 - Unit tests pass with `cargo test --locked`.
-- A `akt build --configure-only` run applied all three patches (checked against SHA256SUMS), kept all six SDR options through `olddefconfig`, and passed the configuration gate.
-- The kernels built from this configuration land with the next ArxOS kernel build; until then the published ArxOS kernels predate these patches.
+- The fragment check was run against the configurations inside the published linux-arxos and linux-arxos-rt 7.3.4-1 packages: after the fragment fixes, the only difference left in each is the D-WAV driver, which those kernels predate.
+- The driver lands with the next ArxOS kernel build of each flavor.
 
 ## Important limitations
 

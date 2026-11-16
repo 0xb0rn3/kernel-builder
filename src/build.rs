@@ -656,7 +656,7 @@ fn package_traits(p: &Plan) -> String {
     if matches!(p.flavor.sched, "bore" | "rt-bore" | "hardened") { t.push("BORE scheduler"); }
     if p.flavor.lto == "thin" { t.push("ThinLTO"); }
     if p.flavor.key == "hardened" { t.push("kCFI"); }
-    if p.flavor.key == "zen" { t.push("gaming: huge pages always, performance governor, NTSYNC"); }
+    if p.flavor.key == "zen" { t.push("gaming: huge pages always, NTSYNC"); }
     t.push("hardened");
     t.join(", ")
 }
@@ -717,6 +717,58 @@ for pkg in "${pkgs[@]}"; do
 done
 "#;
 
+/// Options upstream builds only without PREEMPT_RT. `NETFILTER_XTABLES_LEGACY` is `depends on
+/// !PREEMPT_RT` (net/netfilter/Kconfig), so the legacy iptables/ebtables tables and everything
+/// under them cannot exist in the real-time kernel; its NAT and masquerade come from nftables
+/// (NFT_NAT, NFT_MASQ), which the fragment also sets and which are checked like any other line.
+const RT_UNBUILDABLE: &[&str] = &["CONFIG_BRIDGE_EBT_T_NAT", "CONFIG_IP_NF_NAT",
+    "CONFIG_IP_NF_TARGET_MASQUERADE", "CONFIG_IP6_NF_NAT"];
+
+/// Every line of the ArxOS fragment that `olddefconfig` did not keep, as "line N: CONFIG_X=v
+/// (built: ...)". Kconfig drops an option silently when a dependency is missing or the option no
+/// longer exists, so a fragment line can stop meaning anything without a single error: patch 0003
+/// was applied for months with its driver never built. An empty answer means the resolved config
+/// says what the fragment says.
+fn fragment_drift(config: &str, fragment: &str, flavor: &str) -> Vec<String> {
+    let built = |key: &str| -> Option<&str> {
+        let prefix = format!("{key}=");
+        config.lines().map(str::trim).find_map(|l| l.strip_prefix(prefix.as_str()))
+    };
+    let mut out = vec![];
+    for (n, raw) in fragment.lines().enumerate() {
+        let line = raw.trim();
+        let (key, want) = if let Some(rest) = line.strip_prefix("# ").and_then(|r| r.strip_suffix(" is not set")) {
+            (rest, "n")
+        } else if line.starts_with("CONFIG_") {
+            match line.split_once('=') { Some((k, v)) => (k, v), None => continue }
+        } else {
+            continue;
+        };
+        if !key.starts_with("CONFIG_") { continue; }
+        let got = built(key);
+        let ok = match (want, got) {
+            ("n", None) | ("n", Some("n")) => true,
+            ("n", Some(_)) => false,
+            (w, Some(g)) => w == g,
+            (_, None) => flavor == "rt" && RT_UNBUILDABLE.contains(&key),
+        };
+        if !ok {
+            out.push(format!("line {}: {key}={want} (built: {})", n + 1, got.unwrap_or("not set")));
+        }
+    }
+    out
+}
+
+/// Refuse to compile when the resolved config does not say what the ArxOS fragment says.
+fn verify_fragment(config: &Path, fragment: &Path, flavor: &str) -> io::Result<()> {
+    let drift = fragment_drift(&std::fs::read_to_string(config)?, &std::fs::read_to_string(fragment)?, flavor);
+    if drift.is_empty() { return Ok(()); }
+    for d in &drift { eprintln!("  fragment option not kept by Kconfig: {d}"); }
+    Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+        "{} ArxOS fragment option(s) did not survive Kconfig resolution (listed above); fix config/arxos.fragment, refusing to compile",
+        drift.len())))
+}
+
 fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level: bool) -> io::Result<()> {
     let text = std::fs::read_to_string(config)?;
     let has = |line: &str| text.lines().any(|v| v.trim() == line);
@@ -743,8 +795,7 @@ fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level:
         return Err(fail("CONFIG_LTO_CLANG_THIN=y"));
     }
     if p.flavor.key == "zen" {
-        for want in ["CONFIG_NTSYNC=y", "CONFIG_SCHED_CLASS_EXT=y", "CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=y",
-                     "CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y"] {
+        for want in ["CONFIG_NTSYNC=y", "CONFIG_SCHED_CLASS_EXT=y", "CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=y"] {
             if !has(want) { return Err(fail(&format!("{want} (gaming flavor)"))); }
         }
     }
@@ -905,6 +956,7 @@ fn build_arch(p: &Plan, prepare_only: bool, configure_only: bool) -> io::Result<
     }
     let selected_level = cpu_target_level(&p.cpu_target, workp)?;
     verify_tuning_config(Path::new(&format!("{kdir}/.config")), p, selected_level, true)?;
+    verify_fragment(Path::new(&format!("{kdir}/.config")), &frag, p.flavor.key)?;
     let detected_level = crate::sysinfo::SystemInfo::detect(workp).x86_level;
     if selected_level > detected_level && p.cpu_target != "portable" {
         eprintln!("WARNING: requested x86-64-v{selected_level} exceeds locally detected baseline v{detected_level}; the kernel may not boot on this machine.");
@@ -1237,6 +1289,10 @@ fn build_debian(p: &Plan) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::Other, "ARXOS hardening delta missing after config — aborting before compile"));
     }
     verify_tuning_config(Path::new(&format!("{src}/.config")), p, cpu_level, true)?;
+    // Debian's base config differs from ours, so here a dropped fragment line is reported, not fatal.
+    if let (Ok(c), Ok(f)) = (std::fs::read_to_string(format!("{src}/.config")), std::fs::read_to_string(&frag)) {
+        for d in fragment_drift(&c, &f, p.flavor.key) { eprintln!("  note: fragment option not kept by Kconfig: {d}"); }
+    }
 
     // 4. build .deb packages.
     let current = resources::detect(workp)?;
@@ -1393,12 +1449,45 @@ mod tests {
     }
 
     #[test]
+    fn fragment_drift_reports_every_dropped_line() {
+        let frag = "# comment\nCONFIG_A=y\nCONFIG_B=m\nCONFIG_C=n\n# CONFIG_D is not set\nCONFIG_E=\"arxos\"\nCONFIG_F=1000\n";
+        let good = "CONFIG_A=y\nCONFIG_B=m\n# CONFIG_C is not set\nCONFIG_E=\"arxos\"\nCONFIG_F=1000\n";
+        assert!(fragment_drift(good, frag, "default").is_empty());
+        let bad = "CONFIG_A=m\nCONFIG_C=y\nCONFIG_D=m\nCONFIG_E=\"other\"\nCONFIG_F=1000\n";
+        let d = fragment_drift(bad, frag, "default");
+        assert_eq!(d, vec![
+            "line 2: CONFIG_A=y (built: m)".to_string(),
+            "line 3: CONFIG_B=m (built: not set)".to_string(),
+            "line 4: CONFIG_C=n (built: y)".to_string(),
+            "line 5: CONFIG_D=n (built: m)".to_string(),
+            "line 6: CONFIG_E=\"arxos\" (built: \"other\")".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn fragment_drift_knows_what_real_time_cannot_build() {
+        let frag = "CONFIG_IP_NF_NAT=m\nCONFIG_NFT_NAT=m\n";
+        let rt = "CONFIG_PREEMPT_RT=y\nCONFIG_NFT_NAT=m\n";
+        assert!(fragment_drift(rt, frag, "rt").is_empty());
+        // only absence is excused, only on rt, and nftables NAT is still required there
+        assert_eq!(fragment_drift(rt, frag, "default"), vec!["line 1: CONFIG_IP_NF_NAT=m (built: not set)".to_string()]);
+        assert_eq!(fragment_drift("CONFIG_PREEMPT_RT=y\n", frag, "rt"), vec!["line 2: CONFIG_NFT_NAT=m (built: not set)".to_string()]);
+    }
+
+    #[test]
+    fn the_shipped_fragment_holds_a_patched_driver_and_no_dead_option() {
+        let frag = include_str!("../config/arxos.fragment");
+        assert!(frag.lines().any(|l| l.trim() == "CONFIG_TOUCHSCREEN_DWAV_USB_MT=m"), "patch 0003 adds this driver");
+        assert!(!frag.lines().any(|l| l.trim().starts_with("CONFIG_FTRACE_MCOUNT_RECORD")), "removed upstream");
+    }
+
+    #[test]
     fn package_traits_describe_each_flavor() {
         let plan = |key| Plan::resolve(Distro::Arch, crate::flavor(key).unwrap(), "arxos", None, "1");
         assert_eq!(package_traits(&plan("default")), "BORE scheduler, ThinLTO, hardened");
         assert_eq!(package_traits(&plan("rt")), "PREEMPT_RT, BORE scheduler, hardened");
         assert_eq!(package_traits(&plan("hardened")), "BORE scheduler, ThinLTO, kCFI, hardened");
-        assert_eq!(package_traits(&plan("zen")), "BORE scheduler, ThinLTO, gaming: huge pages always, performance governor, NTSYNC, hardened");
+        assert_eq!(package_traits(&plan("zen")), "BORE scheduler, ThinLTO, gaming: huge pages always, NTSYNC, hardened");
     }
 
     #[test]

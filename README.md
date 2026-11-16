@@ -141,7 +141,7 @@ flowchart LR
 | Option | Values | Default | Notes |
 |---|---|---|---|
 | `--target-distro` | `host`, `auto`, `arch`, `debian` | `host` | A different target than the host uses Podman or Docker. |
-| `--flavor` | `default`, `rt`, `hardened`, `zen` | `default` | See [Flavors](#flavors). `zen` is the gaming flavor: huge pages always, performance governor, NTSYNC built in, sched-ext kept. |
+| `--flavor` | `default`, `rt`, `hardened`, `zen` | `default` | See [Flavors](#flavors). `zen` is the gaming flavor: huge pages always, NTSYNC built in, sched-ext kept. It does not force the performance governor (add `--performance-governor` for that). |
 | `--name`, `--rename` | 1 to 24 characters: lowercase letters, digits, dashes | `arxos` | Builds `linux-NAME`. No leading or trailing dash. |
 | `--pkgrel` | digits | `1` | Package revision. |
 | `--out` | directory | build directory | Where finished packages go. `--output` is rejected with a pointer to `--out`. |

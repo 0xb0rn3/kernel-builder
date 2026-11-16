@@ -54,7 +54,7 @@ pub const FLAVORS: &[Flavor] = &[
     Flavor { key: "hardened", sched: "hardened", lto: "thin", about: "max security posture (KSPP + kCFI)" },
     // For games: the same hardened base with what games and Wine/Proton gain from. Huge pages always
     // on, the performance governor by default, NTSYNC built in, sched-ext kept for scx schedulers.
-    Flavor { key: "zen",      sched: "bore",     lto: "thin", about: "gaming (BORE + ThinLTO, huge pages always, performance governor, NTSYNC built in)" },
+    Flavor { key: "zen",      sched: "bore",     lto: "thin", about: "gaming (BORE + ThinLTO, huge pages always, NTSYNC built in, sched-ext kept)" },
 ];
 pub fn flavor(key: &str) -> Option<&'static Flavor> { FLAVORS.iter().find(|f| f.key == key) }
 
@@ -166,10 +166,11 @@ impl Plan {
         self.hz = hz.to_string();
         self.hugepages = hugepages.to_string();
         self.performance_governor = performance_governor;
-        // the gaming flavor fixes these two: they are what it is
+        // The gaming flavor fixes huge pages: that is what it is. It does not force the performance
+        // governor: on a laptop that costs battery all day, so ArxOS offers it as a Control Center
+        // switch instead (owner, 2026-11-16). --performance-governor still builds it in on request.
         if self.flavor.key == "zen" {
             self.hugepages = "always".into();
-            self.performance_governor = true;
         }
         if !self.tunes.is_empty() {
             let target = if cpu_target == "auto" {

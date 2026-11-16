@@ -16,7 +16,7 @@ CONFIG_DEFAULT_HOSTNAME="arxos"
 CONFIG_LIVEPATCH=y
 CONFIG_DYNAMIC_FTRACE=y
 CONFIG_FUNCTION_TRACER=y
-CONFIG_FTRACE_MCOUNT_RECORD=y
+# (FTRACE_MCOUNT_RECORD is gone upstream: DYNAMIC_FTRACE always records the call sites now.)
 
 # ---- kernel-level ANONYMITY for tools, esp. AnonKit (§9 / qwen.md) ----
 CONFIG_NETFILTER=y
@@ -24,7 +24,9 @@ CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
 CONFIG_NETFILTER_NETLINK=y
 CONFIG_NETFILTER_NETLINK_QUEUE=y
-CONFIG_NETFILTER_XT_MATCH_OWNER=y
+# x_tables is modular in the base, so the owner match can only be a module; it loads with the
+# first rule that uses it.
+CONFIG_NETFILTER_XT_MATCH_OWNER=m
 CONFIG_NF_CONNTRACK=y
 CONFIG_WIREGUARD=y
 CONFIG_NET_NS=y
@@ -42,7 +44,7 @@ CONFIG_IO_URING=y
 # ---- disk crypto: LUKS-default + DEATHSTROKE-ENC prereqs (§9 / DEATHSTROKE.md §7, §10.1 A) ----
 # BLK_DEV_DM is =m in the base; dm-crypt therefore builds modular and the initramfs loads it
 # before unlocking root, which is what LUKS needs — no reason to force it built-in.
-CONFIG_DM_CRYPT=y
+CONFIG_DM_CRYPT=m
 CONFIG_CRYPTO_XTS=y
 CONFIG_CRYPTO_AES=y
 CONFIG_CRYPTO_AES_NI_INTEL=y
@@ -154,6 +156,10 @@ CONFIG_USB_AIRSPY=m
 CONFIG_USB_MSI2500=m
 CONFIG_MEDIA_TUNER_MSI001=m
 CONFIG_DVB_RTL2832_SDR=m
+
+# ---- input: the D-WAV Scientific USB multitouch driver (patches/arxos/0003) ----
+# The patch adds the driver; without this line it was applied and never built (found 2026-11-16).
+CONFIG_TOUCHSCREEN_DWAV_USB_MT=m
 
 # ---- eBPF / BTF for defensive tooling + threat hunting (qwen.md) ----
 CONFIG_BPF_SYSCALL=y
