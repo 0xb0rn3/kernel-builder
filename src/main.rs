@@ -594,6 +594,24 @@ fn main() -> ExitCode {
                 None => { eprintln!("akt gate <config-file>"); ExitCode::FAILURE }
             }
         }
+        "fragment" => {
+            let cfg = args.get(1).filter(|a| !a.starts_with("--"));
+            let flavor = flag(&args, "--flavor").unwrap_or("default");
+            let frag = data_dir().join("config/arxos.fragment");
+            match (cfg, std::fs::read_to_string(&frag)) {
+                (Some(path), Ok(f)) => match std::fs::read_to_string(path) {
+                    Ok(c) => {
+                        let drift = build::fragment_drift(&c, &f, flavor);
+                        for d in &drift { println!("{} {d}", if d.required { "required" } else { "optional" }); }
+                        if drift.is_empty() { println!("fragment: every line kept"); }
+                        if drift.iter().any(|d| d.required) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+                    }
+                    Err(e) => { eprintln!("akt fragment: {path}: {e}"); ExitCode::FAILURE }
+                },
+                (None, _) => { eprintln!("akt fragment <config-file> [--flavor F]"); ExitCode::FAILURE }
+                (_, Err(e)) => { eprintln!("akt fragment: {}: {e}", frag.display()); ExitCode::FAILURE }
+            }
+        }
         "gui" => {
             let port: u16 = flag(&args, "--port").and_then(|p| p.parse().ok()).unwrap_or(8787);
             match server::serve(port) { Ok(_) => ExitCode::SUCCESS, Err(e) => { eprintln!("akt gui: {e}"); ExitCode::FAILURE } }
@@ -654,6 +672,9 @@ fn usage() -> String {
                          A same-name upgrade removes the old version's modules, so the retained
                          prev/ package is the reliable rollback; boot-test in a throwaway first.
   gate   <config-file>   verify the ARXOS hardening delta is present in a built .config
+  fragment <config-file> [--flavor F]
+                         which ArxOS fragment lines a built .config did not keep: required ones
+                         (protections, AnonKit) stop a build, optional ones are reported only
   gui    [--port N]      launch the local web GUI (default http://127.0.0.1:8787)
   version
 
@@ -662,6 +683,6 @@ file in a patch directory is verified before any patch is applied. Patches are a
 or -p0, already-applied patches are skipped, and in strict mode (default) a patch that does not apply
 aborts the build so a kernel is never silently shipped without an expected fix.
 
-FLAVORS: default (BORE+ThinLTO) | rt (PREEMPT_RT) | hardened (KSPP+kCFI)
+FLAVORS: default (BORE+ThinLTO) | rt (PREEMPT_RT) | zen (gaming) | hardened (KSPP+kCFI)
 Add --json to detect/plan/gate for machine-readable output.")
 }

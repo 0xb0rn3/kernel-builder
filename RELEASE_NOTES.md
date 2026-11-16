@@ -1,4 +1,8 @@
-# akt v0.5.6
+# akt v0.5.6-1
+
+**Only a protection stops the build.** v0.5.6 refused to compile when any line of the ArxOS config fragment did not survive Kconfig, so an option renamed or dropped upstream, even a touchscreen driver, would have held back a kernel security update until someone edited the fragment. Now a section of the fragment is marked `[required]` when it holds protections or what AnonKit needs (hardening, disk crypto, anonymity, netfilter, address privacy): a drop there still stops the build. Any other drop is printed as a notice and the build goes on. `akt fragment <config> [--flavor F]` lists both kinds for a built configuration.
+
+## Earlier: v0.5.6
 
 **A config option that Kconfig drops now stops the build, and the gaming flavor leaves the CPU governor to you.** This release follows v0.5.4.
 

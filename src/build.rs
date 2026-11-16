@@ -724,19 +724,39 @@ done
 const RT_UNBUILDABLE: &[&str] = &["CONFIG_BRIDGE_EBT_T_NAT", "CONFIG_IP_NF_NAT",
     "CONFIG_IP_NF_TARGET_MASQUERADE", "CONFIG_IP6_NF_NAT"];
 
-/// Every line of the ArxOS fragment that `olddefconfig` did not keep, as "line N: CONFIG_X=v
-/// (built: ...)". Kconfig drops an option silently when a dependency is missing or the option no
-/// longer exists, so a fragment line can stop meaning anything without a single error: patch 0003
-/// was applied for months with its driver never built. An empty answer means the resolved config
-/// says what the fragment says.
-fn fragment_drift(config: &str, fragment: &str, flavor: &str) -> Vec<String> {
+/// One fragment line that `olddefconfig` did not keep.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drift {
+    pub line: usize,
+    pub want: String,
+    pub built: String,
+    /// in a `[required]` section of the fragment: a protection or AnonKit depends on it
+    pub required: bool,
+}
+
+impl std::fmt::Display for Drift {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "line {}: {} (built: {})", self.line, self.want, self.built)
+    }
+}
+
+/// Every line of the ArxOS fragment that `olddefconfig` did not keep. Kconfig drops an option
+/// silently when a dependency is missing or the option no longer exists, so a fragment line can stop
+/// meaning anything without a single error: patch 0003 was applied for months with its driver never
+/// built. A drop in a section whose header says `[required]` (hardening, AnonKit, disk crypto) stops
+/// the build; any other drop (a driver, a tool's helper) is reported and the build goes on, so a
+/// renamed option upstream never holds back a kernel security update. An empty answer means the
+/// resolved config says what the fragment says.
+pub fn fragment_drift(config: &str, fragment: &str, flavor: &str) -> Vec<Drift> {
     let built = |key: &str| -> Option<&str> {
         let prefix = format!("{key}=");
         config.lines().map(str::trim).find_map(|l| l.strip_prefix(prefix.as_str()))
     };
     let mut out = vec![];
+    let mut required = false;
     for (n, raw) in fragment.lines().enumerate() {
         let line = raw.trim();
+        if line.starts_with("# ----") { required = line.contains("[required]"); continue; }
         let (key, want) = if let Some(rest) = line.strip_prefix("# ").and_then(|r| r.strip_suffix(" is not set")) {
             (rest, "n")
         } else if line.starts_with("CONFIG_") {
@@ -753,20 +773,24 @@ fn fragment_drift(config: &str, fragment: &str, flavor: &str) -> Vec<String> {
             (_, None) => flavor == "rt" && RT_UNBUILDABLE.contains(&key),
         };
         if !ok {
-            out.push(format!("line {}: {key}={want} (built: {})", n + 1, got.unwrap_or("not set")));
+            out.push(Drift { line: n + 1, want: format!("{key}={want}"), built: got.unwrap_or("not set").to_string(), required });
         }
     }
     out
 }
 
-/// Refuse to compile when the resolved config does not say what the ArxOS fragment says.
+/// Refuse to compile when a required fragment line did not survive Kconfig; report the others.
 fn verify_fragment(config: &Path, fragment: &Path, flavor: &str) -> io::Result<()> {
     let drift = fragment_drift(&std::fs::read_to_string(config)?, &std::fs::read_to_string(fragment)?, flavor);
-    if drift.is_empty() { return Ok(()); }
-    for d in &drift { eprintln!("  fragment option not kept by Kconfig: {d}"); }
+    for d in drift.iter().filter(|d| !d.required) {
+        eprintln!("  notice: built without {d} (not required; reported, the build goes on)");
+    }
+    let required: Vec<&Drift> = drift.iter().filter(|d| d.required).collect();
+    if required.is_empty() { return Ok(()); }
+    for d in &required { eprintln!("  fragment option not kept by Kconfig: {d} (required)"); }
     Err(io::Error::new(io::ErrorKind::InvalidData, format!(
-        "{} ArxOS fragment option(s) did not survive Kconfig resolution (listed above); fix config/arxos.fragment, refusing to compile",
-        drift.len())))
+        "{} required ArxOS fragment option(s) did not survive Kconfig resolution (listed above); fix config/arxos.fragment, refusing to compile",
+        required.len())))
 }
 
 fn verify_tuning_config(config: &Path, p: &Plan, cpu_level: u8, check_cpu_level: bool) -> io::Result<()> {
@@ -1454,7 +1478,7 @@ mod tests {
         let good = "CONFIG_A=y\nCONFIG_B=m\n# CONFIG_C is not set\nCONFIG_E=\"arxos\"\nCONFIG_F=1000\n";
         assert!(fragment_drift(good, frag, "default").is_empty());
         let bad = "CONFIG_A=m\nCONFIG_C=y\nCONFIG_D=m\nCONFIG_E=\"other\"\nCONFIG_F=1000\n";
-        let d = fragment_drift(bad, frag, "default");
+        let d: Vec<String> = fragment_drift(bad, frag, "default").iter().map(|d| d.to_string()).collect();
         assert_eq!(d, vec![
             "line 2: CONFIG_A=y (built: m)".to_string(),
             "line 3: CONFIG_B=m (built: not set)".to_string(),
@@ -1465,13 +1489,31 @@ mod tests {
     }
 
     #[test]
+    fn only_a_required_section_stops_the_build() {
+        let frag = "# ---- radios ----\nCONFIG_RADIO=m\n# ---- [required] anonymity ----\nCONFIG_NFT_NAT=m\n# ---- input ----\nCONFIG_TOUCH=m\n";
+        let d = fragment_drift("", frag, "default");
+        assert_eq!(d.iter().map(|d| (d.line, d.required)).collect::<Vec<_>>(), vec![(2, false), (4, true), (6, false)]);
+        let dir = std::env::temp_dir().join(format!("akt-frag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cfg, f) = (dir.join("config"), dir.join("fragment"));
+        std::fs::write(&f, frag).unwrap();
+        // the required option is there, two optional ones dropped: the build goes on
+        std::fs::write(&cfg, "CONFIG_NFT_NAT=m\n").unwrap();
+        assert!(verify_fragment(&cfg, &f, "default").is_ok());
+        // the required one dropped: the build stops
+        std::fs::write(&cfg, "CONFIG_RADIO=m\nCONFIG_TOUCH=m\n").unwrap();
+        assert!(verify_fragment(&cfg, &f, "default").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn fragment_drift_knows_what_real_time_cannot_build() {
         let frag = "CONFIG_IP_NF_NAT=m\nCONFIG_NFT_NAT=m\n";
         let rt = "CONFIG_PREEMPT_RT=y\nCONFIG_NFT_NAT=m\n";
         assert!(fragment_drift(rt, frag, "rt").is_empty());
         // only absence is excused, only on rt, and nftables NAT is still required there
-        assert_eq!(fragment_drift(rt, frag, "default"), vec!["line 1: CONFIG_IP_NF_NAT=m (built: not set)".to_string()]);
-        assert_eq!(fragment_drift("CONFIG_PREEMPT_RT=y\n", frag, "rt"), vec!["line 2: CONFIG_NFT_NAT=m (built: not set)".to_string()]);
+        assert_eq!(fragment_drift(rt, frag, "default")[0].to_string(), "line 1: CONFIG_IP_NF_NAT=m (built: not set)");
+        assert_eq!(fragment_drift("CONFIG_PREEMPT_RT=y\n", frag, "rt")[0].to_string(), "line 2: CONFIG_NFT_NAT=m (built: not set)");
     }
 
     #[test]
@@ -1479,6 +1521,12 @@ mod tests {
         let frag = include_str!("../config/arxos.fragment");
         assert!(frag.lines().any(|l| l.trim() == "CONFIG_TOUCHSCREEN_DWAV_USB_MT=m"), "patch 0003 adds this driver");
         assert!(!frag.lines().any(|l| l.trim().starts_with("CONFIG_FTRACE_MCOUNT_RECORD")), "removed upstream");
+        // the protections and AnonKit's netfilter stop a build when they go; a driver does not
+        let req = |key: &str| fragment_drift("", frag, "default").into_iter().find(|d| d.want.starts_with(&format!("{key}="))).map(|d| d.required);
+        assert_eq!(req("CONFIG_NFT_NAT"), Some(true));
+        assert_eq!(req("CONFIG_DM_CRYPT"), Some(true));
+        assert_eq!(req("CONFIG_TOUCHSCREEN_DWAV_USB_MT"), Some(false));
+        assert_eq!(req("CONFIG_USB_HACKRF"), Some(false));
     }
 
     #[test]
